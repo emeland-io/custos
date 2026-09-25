@@ -1,6 +1,6 @@
 BINARY := custos
 
-.PHONY: all build web go test dev-server dev-web clean
+.PHONY: all build web go test docker dev-server dev-web clean
 
 all: build
 
@@ -20,6 +20,10 @@ test:
 	go vet ./...
 	go test ./...
 	cd web && npm run typecheck
+
+## docker: build the container image custos:dev
+docker:
+	docker build -t $(BINARY):dev .
 
 ## dev-server: run the API on :8080 with data below ./tmp
 dev-server:

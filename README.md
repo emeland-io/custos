@@ -67,6 +67,25 @@ Then open <http://localhost:8080>.
 
 Flags win over environment variables.
 
+## Container image
+
+Images for linux/amd64 and linux/arm64 are published to
+`ghcr.io/emeland-io/custos` for every push to `main` (`main`, `latest`,
+`sha-<commit>`) and every `v*` tag (`1.2.3`, `1.2`). They carry SLSA
+provenance and an SBOM.
+
+```sh
+docker run -p 8080:8080 -v custos-data:/data ghcr.io/emeland-io/custos:latest
+```
+
+The image runs as a non-root user and keeps its data in the `/data` volume:
+the root dir is `/data/root`, the work dir `/data/work`, and trusted keys go
+into `/data/work/keys`. To keep the root dir in a git checkout, mount it
+separately, for example `-v "$PWD/tree:/data/root"`; it must be writable by
+UID 65532. All settings can be changed through the `CUSTOS_*` variables.
+
+`make docker` builds the image locally.
+
 ## Development
 
 ```sh

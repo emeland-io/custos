@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+/custos
+/tmp
+web/node_modules
+web/dist
+!web/dist/.gitkeep
+*.md
+!README.md
