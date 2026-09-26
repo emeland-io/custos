@@ -36,6 +36,35 @@ func TestParse(t *testing.T) {
 			want: Config{RootDir: "flag", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":8080"},
 		},
 		{
+			name: "port flag keeps the host of addr",
+			args: []string{"--root-dir", "r", "--work-dir", "w", "--addr", "127.0.0.1:8080", "--port", "9000"},
+			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: "127.0.0.1:9000", Port: 9000},
+		},
+		{
+			name: "port env, flag wins",
+			args: []string{"--root-dir", "r", "--work-dir", "w", "--port", "9001"},
+			env:  map[string]string{"CUSTOS_PORT": "9002"},
+			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":9001", Port: 9001},
+		},
+		{
+			name: "port env",
+			args: []string{"--root-dir", "r", "--work-dir", "w"},
+			env:  map[string]string{"CUSTOS_PORT": "9002"},
+			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":9002", Port: 9002},
+		},
+		{
+			name: "container with banner off",
+			args: []string{"--root-dir", "r", "--work-dir", "w", "--no-banner"},
+			env:  map[string]string{"CUSTOS_CONTAINER": "true"},
+			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":8080", Container: true, NoBanner: true},
+		},
+		{
+			name: "banner off by env",
+			args: []string{"--root-dir", "r", "--work-dir", "w"},
+			env:  map[string]string{"CUSTOS_NO_BANNER": "1"},
+			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":8080", NoBanner: true},
+		},
+		{
 			name: "defaults",
 			args: []string{"--root-dir", "r", "--work-dir", "w"},
 			want: Config{RootDir: "r", WorkDir: "w", KeysDir: filepath.Join("w", "keys"), Addr: ":8080"},
@@ -61,9 +90,21 @@ func TestParseErrors(t *testing.T) {
 		"missing root dir": {args: []string{"--work-dir", "w"}},
 		"missing work dir": {args: []string{"--root-dir", "r"}},
 		"bad bool env":     {args: []string{"--root-dir", "r", "--work-dir", "w"}, env: map[string]string{"CUSTOS_SIGSTORE_ONLINE": "maybe"}},
+		"port zero":        {args: []string{"--root-dir", "r", "--work-dir", "w", "--port", "0"}},
+		"port too high":    {args: []string{"--root-dir", "r", "--work-dir", "w", "--port", "70000"}},
+		"port env not int": {args: []string{"--root-dir", "r", "--work-dir", "w"}, env: map[string]string{"CUSTOS_PORT": "abc"}},
+		"bad banner env":   {args: []string{"--root-dir", "r", "--work-dir", "w"}, env: map[string]string{"CUSTOS_NO_BANNER": "maybe"}},
 	} {
 		if _, err := Parse(tc.args, env(tc.env)); err == nil {
 			t.Errorf("%s: no error", name)
+		}
+	}
+}
+
+func TestListenPort(t *testing.T) {
+	for addr, want := range map[string]string{":8080": "8080", "127.0.0.1:9000": "9000", "[::1]:7": "7"} {
+		if got := (Config{Addr: addr}).ListenPort(); got != want {
+			t.Errorf("%s: got %q, want %q", addr, got, want)
 		}
 	}
 }

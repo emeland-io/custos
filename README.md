@@ -63,6 +63,8 @@ Then open <http://localhost:8080>.
 | `--work-dir` | `CUSTOS_WORK_DIR` | required |
 | `--keys-dir` | `CUSTOS_KEYS_DIR` | `<work-dir>/keys` |
 | `--addr` | `CUSTOS_ADDR` | `:8080` |
+| `--port` | `CUSTOS_PORT` | port of `--addr` (replaces only the port) |
+| `--no-banner` | `CUSTOS_NO_BANNER` | `false` (hide the container startup message) |
 | `--sigstore-online` | `CUSTOS_SIGSTORE_ONLINE` | `false` (allow Rekor lookups for keyless DSSE envelopes) |
 
 Flags win over environment variables.
@@ -75,14 +77,22 @@ Images for linux/amd64 and linux/arm64 are published to
 provenance and an SBOM.
 
 ```sh
-docker run -p 8080:8080 -v custos-data:/data ghcr.io/emeland-io/custos:latest
+docker run -p 9090:8080 \
+  -v custos-root:/data/root \
+  -v custos-work:/data/work \
+  ghcr.io/emeland-io/custos:latest
 ```
 
-The image runs as a non-root user and keeps its data in the `/data` volume:
-the root dir is `/data/root`, the work dir `/data/work`, and trusted keys go
-into `/data/work/keys`. To keep the root dir in a git checkout, mount it
-separately, for example `-v "$PWD/tree:/data/root"`; it must be writable by
-UID 65532. All settings can be changed through the `CUSTOS_*` variables.
+Then open <http://localhost:9090>. On startup the container prints these
+instructions; hide them with `--no-banner`.
+
+The image runs as a non-root user and keeps its data in two volumes: the
+root dir `/data/root` and the work dir `/data/work`; trusted keys go into
+`/data/work/keys`. To keep the root dir in a git checkout, bind-mount it
+instead, for example `-v "$PWD/tree:/data/root"`; it must be writable by
+UID 65532. To listen on another port inside the container, pass
+`--port <port>` and adjust the right side of `-p`. All settings can also be
+changed through the `CUSTOS_*` variables.
 
 `make docker` builds the image locally.
 

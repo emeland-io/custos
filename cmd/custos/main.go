@@ -75,6 +75,10 @@ func run(log *slog.Logger) error {
 		WriteTimeout:      time.Minute,
 	}
 
+	if cfg.Container && !cfg.NoBanner {
+		writeBanner(os.Stdout, cfg)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errc := make(chan error, 1)

@@ -25,10 +25,12 @@ RUN mkdir -p /out/data/root /out/data/work
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/custos /usr/local/bin/custos
 COPY --from=build --chown=65532:65532 /out/data /data
+# CUSTOS_CONTAINER makes custos print how to map volumes and ports on
+# startup; --no-banner hides it.
 ENV CUSTOS_ROOT_DIR=/data/root \
     CUSTOS_WORK_DIR=/data/work \
-    CUSTOS_ADDR=:8080
-VOLUME /data
+    CUSTOS_CONTAINER=true
+VOLUME ["/data/root", "/data/work"]
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/custos"]
