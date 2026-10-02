@@ -89,7 +89,11 @@ version:
 The **current version** of a task is the version of it that no other version
 references in `previous`. A task whose versions have all been referenced by a
 version of another task (B after the merge above) is **superseded** and has
-no current version.
+no current version. It continues as part of the task that merged it: its
+version files and history stay, but it is no longer a task of its own and
+cannot be listed in a group. The publish that merges B must therefore also
+remove B from its group (rule 5). How answers to a superseded task are
+handled in workspaces is described in section 3.3.
 
 **Rules enforced on `main`** (by `custos validate`, the UI, and the
 pre-receive hook):
@@ -165,6 +169,13 @@ effect** and appears in the book; the task is shown as *pending update*.
 Answering the newer version overwrites the file. Older answers remain
 reachable through Git history.
 
+**Answers to merged tasks.** When A@2.0.0 merges B, the answer files of A and
+B both stay in effect until A@2.0.0 is answered. Until then, the book shows
+A's old answer and B's old answer together at A's position. Once A@2.0.0 is
+answered, that answer replaces both in the book. B's answer file stays in
+the workspace, so the reference view (section 4.2) can show it, and is kept
+in Git history.
+
 **Generated task** files use the task version format plus:
 
 | Field | Meaning |
@@ -214,7 +225,8 @@ engineer. **Still valid** writes the same content with the new
 is shown to the engineer as a proposal in the same session.
 
 For a merged task, the answers of all its `previous` tasks are shown as
-reference until the merged task is answered.
+reference while the engineer writes the merged answer. Until it is
+answered, those answers stay in effect in the book (section 3.3).
 
 ### 4.3 Processor runs and proposals
 
