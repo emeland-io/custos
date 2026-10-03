@@ -31,6 +31,30 @@ func TestResolveRef(t *testing.T) {
 	}
 }
 
+// TestResolveRefExactRefName checks that a fully qualified ref name
+// (refs/…) is resolved exactly, not through rev-parse's DWIM lookup, which
+// would otherwise let a tag named refs/tags/refs/heads/main stand in for a
+// missing refs/heads/main.
+func TestResolveRefExactRefName(t *testing.T) {
+	dir := gittest.Init(t)
+	c1 := gittest.Commit(t, dir, map[string]string{"a.txt": "one"})
+	gittest.Run(t, dir, "update-ref", "refs/tags/refs/heads/main", c1)
+	gittest.Run(t, dir, "update-ref", "-d", "refs/heads/main")
+	r := &Repo{Dir: dir}
+	if oid, ok, err := r.ResolveRef("refs/heads/main"); ok || err != nil {
+		t.Errorf("DWIM must not let the tag stand in for main: %q %v %v", oid, ok, err)
+	}
+	if oid, ok, err := r.ResolveRef("refs/heads/main^{commit}"); ok || err != nil {
+		t.Errorf("DWIM must not let the tag stand in for main (commit form): %q %v %v", oid, ok, err)
+	}
+	if oid, ok, err := r.ResolveRef("refs/tags/refs/heads/main"); oid != c1 || !ok || err != nil {
+		t.Errorf("the tag itself must still resolve by its real name: %q %v %v", oid, ok, err)
+	}
+	if oid, ok, err := r.ResolveRef("refs/tags/refs/heads/main^{commit}"); oid != c1 || !ok || err != nil {
+		t.Errorf("the tag must still peel to its commit: %q %v %v", oid, ok, err)
+	}
+}
+
 // TestHookEnvironment checks that a Repo ignores the variables git sets for
 // a hook, which point at another repository's objects, unless it is the
 // repository the hook runs in.

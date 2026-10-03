@@ -162,6 +162,25 @@ func TestCreateWorkspaceNeedsCatalog(t *testing.T) {
 	}
 }
 
+// TestCreateWorkspaceIgnoresTagImpersonatingMain checks that a tag named
+// refs/tags/refs/heads/main cannot stand in for a catalog main that was
+// never pushed (ruling 2.13 and the pin rule).
+func TestCreateWorkspaceIgnoresTagImpersonatingMain(t *testing.T) {
+	s, err := Open(t.TempDir(), "/custos", publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := s.CatalogRepo().Dir
+	commit := gittest.Run(t, dir, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "test")
+	gittest.Run(t, dir, "update-ref", "refs/tags/refs/heads/main", commit)
+	if err := s.CreateWorkspace(fixture.WorkspaceID, jane); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "push the catalog first") {
+		t.Errorf("tag impersonating main: %v", err)
+	}
+	if ids, _ := s.WorkspaceIDs(); len(ids) != 0 {
+		t.Errorf("ids %v", ids)
+	}
+}
+
 func TestCreateWorkspaceRepo(t *testing.T) {
 	s := New(t.TempDir(), "/custos", publicURL)
 	repo, err := s.CreateWorkspaceRepo(fixture.WorkspaceID)

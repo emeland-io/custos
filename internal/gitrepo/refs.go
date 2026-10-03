@@ -8,15 +8,52 @@ import (
 	"strings"
 )
 
+// commitSuffix peels a ref or object id to the commit it points at; see
+// ResolveRef.
+const commitSuffix = "^{commit}"
+
 // ResolveRef returns the object id ref points to; ok is false when there is
 // no such ref. ref may be any revision git understands. A full object id
 // resolves to itself even when the object does not exist; append "^{commit}"
 // to check that a commit exists.
+//
+// A ref already written as refs/… (optionally followed by "^{commit}") is
+// resolved as that exact ref, never through rev-parse's DWIM lookup: given a
+// missing refs/heads/main, DWIM would also try refs/refs/heads/main,
+// refs/tags/refs/heads/main and refs/heads/refs/heads/main, letting an
+// unrelated ref such as a tag named refs/heads/main stand in for it.
 func (r *Repo) ResolveRef(ref string) (oid string, ok bool, err error) {
 	if err := checkRev(ref); err != nil {
 		return "", false, err
 	}
-	out, err := r.git("rev-parse", "--verify", "--quiet", "--end-of-options", ref)
+	if name, peel := strings.CutSuffix(ref, commitSuffix); strings.HasPrefix(name, "refs/") {
+		return r.resolveExactRef(name, peel)
+	}
+	return r.revParseVerify(ref)
+}
+
+// resolveExactRef resolves name as the literal ref name, bypassing rev-parse's
+// DWIM lookup, optionally peeling the result to the commit it points at.
+func (r *Repo) resolveExactRef(name string, peelToCommit bool) (string, bool, error) {
+	out, err := r.git("show-ref", "--verify", "--", name)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	oid, _, _ := strings.Cut(strings.TrimSpace(string(out)), " ")
+	if !peelToCommit {
+		return oid, true, nil
+	}
+	return r.revParseVerify(oid + commitSuffix)
+}
+
+// revParseVerify resolves rev with rev-parse's usual DWIM lookup; used for
+// object ids and "<oid>^{commit}" expressions, which are unambiguous.
+func (r *Repo) revParseVerify(rev string) (string, bool, error) {
+	out, err := r.git("rev-parse", "--verify", "--quiet", "--end-of-options", rev)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return "", false, nil
