@@ -14,12 +14,14 @@ import (
 // stdin, and shows its stderr to the person pushing.
 func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "pre-receive" {
-		fmt.Fprintln(stderr, "usage: custos hook pre-receive --kind catalog|workspace")
+		fmt.Fprintln(stderr, "usage: custos hook pre-receive --kind catalog|workspace [--catalog DIR --workspace UUID]")
 		return 2
 	}
 	fl := flag.NewFlagSet("hook pre-receive", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	kindFlag := fl.String("kind", "", "catalog or workspace")
+	catalogDir := fl.String("catalog", "", "absolute path of catalog.git (workspace hooks)")
+	workspaceID := fl.String("workspace", "", "id of the workspace the repository belongs to (workspace hooks)")
 	if err := fl.Parse(args[1:]); err != nil {
 		return helpOrUsage(err)
 	}
@@ -28,7 +30,10 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos hook: %v\n", err)
 		return 2
 	}
-	ps, err := hook.PreReceive(&gitrepo.Repo{Dir: ".", InheritGitEnv: true}, kind, stdin)
+	// The repository the hook runs in sees the quarantined objects of the
+	// push through git's environment; the catalog must not.
+	opts := hook.ScriptOptions{Kind: kind, CatalogDir: *catalogDir, WorkspaceID: *workspaceID}
+	ps, err := hook.PreReceive(&gitrepo.Repo{Dir: ".", InheritGitEnv: true}, opts, stdin)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos hook: %v\n", err)
 		return 1

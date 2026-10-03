@@ -19,7 +19,7 @@ func update(old, new, ref string) io.Reader {
 
 func check(t *testing.T, dir string, kind Kind, input io.Reader) []problem.Problem {
 	t.Helper()
-	ps, err := PreReceive(&gitrepo.Repo{Dir: dir}, kind, input)
+	ps, err := PreReceive(&gitrepo.Repo{Dir: dir}, ScriptOptions{Kind: kind}, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,31 +81,74 @@ func TestRewritingMain(t *testing.T) {
 }
 
 func TestWorkspace(t *testing.T) {
+	cat := gittest.Init(t)
+	c1 := gittest.Commit(t, cat, fixture.Catalog())
+	opts := ScriptOptions{Kind: Workspace, CatalogDir: cat, WorkspaceID: fixture.WorkspaceID}
+	run := func(dir string, input io.Reader) []problem.Problem {
+		t.Helper()
+		ps, err := PreReceive(&gitrepo.Repo{Dir: dir}, opts, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ps
+	}
+
 	dir := gittest.Init(t)
-	c1 := gittest.Commit(t, dir, fixture.Workspace())
-	fixture.WantNone(t, check(t, dir, Workspace, update(zero, c1, "refs/heads/main")))
+	w1 := gittest.Commit(t, dir, fixture.PinnedWorkspace(c1))
+	fixture.WantNone(t, run(dir, update(zero, w1, "refs/heads/main")))
+	// The fixture's pin is no commit of this catalog.
+	w2 := gittest.Commit(t, dir, fixture.Workspace())
+	fixture.WantProblem(t, run(dir, update(w1, w2, "refs/heads/main")), "custos.yaml", problem.RulePin, "does not exist")
+	fixture.WantNone(t, run(dir, update(w1, w2, "refs/heads/draft")))
 
 	other := gittest.Init(t)
 	c2 := gittest.Commit(t, other, fixture.Catalog())
-	fixture.WantProblem(t, check(t, other, Workspace, update(zero, c2, "refs/heads/main")), "custos.yaml", problem.RuleFormat, "missing")
+	fixture.WantProblem(t, run(other, update(zero, c2, "refs/heads/main")), "custos.yaml", problem.RuleFormat, "missing")
+}
+
+func TestWorkspaceNeedsOptions(t *testing.T) {
+	for _, opts := range []ScriptOptions{
+		{Kind: Workspace, WorkspaceID: fixture.WorkspaceID},
+		{Kind: Workspace, CatalogDir: "relative/catalog.git", WorkspaceID: fixture.WorkspaceID},
+		{Kind: Workspace, CatalogDir: "/data/repos/catalog.git", WorkspaceID: "ws-1"},
+		{Kind: "other"},
+	} {
+		if _, err := PreReceive(&gitrepo.Repo{Dir: t.TempDir()}, opts, strings.NewReader("")); err == nil {
+			t.Errorf("PreReceive accepted %+v", opts)
+		}
+		if _, err := Script("/custos", opts); err == nil {
+			t.Errorf("Script accepted %+v", opts)
+		}
+	}
 }
 
 func TestMalformedInput(t *testing.T) {
-	if _, err := PreReceive(&gitrepo.Repo{Dir: t.TempDir()}, Catalog, strings.NewReader("garbage\n")); err == nil {
+	if _, err := PreReceive(&gitrepo.Repo{Dir: t.TempDir()}, ScriptOptions{Kind: Catalog}, strings.NewReader("garbage\n")); err == nil {
 		t.Error("want error")
 	}
 }
 
 func TestScript(t *testing.T) {
-	s, err := Script("/usr/local/bin/custos", Workspace)
+	s, err := Script("/usr/local/bin/custos", ScriptOptions{Kind: Catalog})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "#!/bin/sh\nexec '/usr/local/bin/custos' hook pre-receive --kind workspace\n"; s != want {
+	if want := "#!/bin/sh\nexec '/usr/local/bin/custos' hook pre-receive --kind catalog\n"; s != want {
 		t.Errorf("got %q, want %q", s, want)
 	}
-	if _, err := Script("/tmp/it's/custos", Catalog); err == nil {
+	s, err = Script("/usr/local/bin/custos", ScriptOptions{Kind: Workspace, CatalogDir: "/data/repos/catalog.git", WorkspaceID: fixture.WorkspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#!/bin/sh\nexec '/usr/local/bin/custos' hook pre-receive --kind workspace --catalog '/data/repos/catalog.git' --workspace " + fixture.WorkspaceID + "\n"
+	if s != want {
+		t.Errorf("got %q, want %q", s, want)
+	}
+	if _, err := Script("/tmp/it's/custos", ScriptOptions{Kind: Catalog}); err == nil {
 		t.Error("a quote in the path must be rejected")
+	}
+	if _, err := Script("/custos", ScriptOptions{Kind: Workspace, CatalogDir: "/it's/catalog.git", WorkspaceID: fixture.WorkspaceID}); err == nil {
+		t.Error("a quote in the catalog path must be rejected")
 	}
 }
 

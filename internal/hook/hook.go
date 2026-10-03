@@ -1,17 +1,19 @@
 // Package hook implements the pre-receive hook that keeps the main branch
-// of every custos repository valid.
+// of every custos repository valid. The rules themselves live in package
+// rules, which the store applies to its own writes too.
 package hook
 
 import (
 	"bufio"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
-	"github.com/emeland-io/custos/internal/catalog"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/problem"
-	"github.com/emeland-io/custos/internal/workspace"
+	"github.com/emeland-io/custos/internal/rules"
+	"github.com/emeland-io/custos/internal/task"
 )
 
 // Kind is the kind of repository a hook guards.
@@ -33,10 +35,37 @@ func ParseKind(s string) (Kind, error) {
 	return "", fmt.Errorf("unknown repository kind %q, want catalog or workspace", s)
 }
 
+// ScriptOptions describe the repository a hook guards.
+type ScriptOptions struct {
+	Kind        Kind
+	CatalogDir  string // absolute path of catalog.git; workspace hooks only
+	WorkspaceID string // workspace hooks only
+}
+
+func (o ScriptOptions) check() error {
+	switch o.Kind {
+	case Catalog:
+		return nil
+	case Workspace:
+		if !filepath.IsAbs(o.CatalogDir) || strings.ContainsAny(o.CatalogDir, "'\n") {
+			return fmt.Errorf("workspace hook: catalog directory %q must be an absolute path without quotes or line breaks", o.CatalogDir)
+		}
+		if !task.ValidID(o.WorkspaceID) {
+			return fmt.Errorf("workspace hook: workspace id %q is not a lowercase UUID v4", o.WorkspaceID)
+		}
+		return nil
+	}
+	_, err := ParseKind(string(o.Kind))
+	return err
+}
+
 // PreReceive checks the ref updates git passes to a pre-receive hook, one
 // "<old> <new> <ref>" line each. Only main is checked; draft branches may
 // hold anything and may be rewritten.
-func PreReceive(repo *gitrepo.Repo, kind Kind, updates io.Reader) ([]problem.Problem, error) {
+func PreReceive(repo *gitrepo.Repo, opts ScriptOptions, updates io.Reader) ([]problem.Problem, error) {
+	if err := opts.check(); err != nil {
+		return nil, err
+	}
 	var ps []problem.Problem
 	sc := bufio.NewScanner(updates)
 	for sc.Scan() {
@@ -47,7 +76,13 @@ func PreReceive(repo *gitrepo.Repo, kind Kind, updates io.Reader) ([]problem.Pro
 		if f[2] != mainRef {
 			continue
 		}
-		mps, err := checkMain(repo, kind, f[0], f[1])
+		var mps []problem.Problem
+		var err error
+		if opts.Kind == Catalog {
+			mps, err = rules.CheckCatalogUpdate(repo, f[0], f[1])
+		} else {
+			mps, err = rules.CheckWorkspaceUpdate(repo, &gitrepo.Repo{Dir: opts.CatalogDir}, opts.WorkspaceID, f[0], f[1])
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -56,45 +91,17 @@ func PreReceive(repo *gitrepo.Repo, kind Kind, updates io.Reader) ([]problem.Pro
 	return ps, sc.Err()
 }
 
-func checkMain(repo *gitrepo.Repo, kind Kind, oldOID, newOID string) ([]problem.Problem, error) {
-	var ps problem.List
-	if gitrepo.IsZero(newOID) {
-		ps.Add("", problem.RuleHistory, "main cannot be deleted")
-		return ps, nil
-	}
-	if !gitrepo.IsZero(oldOID) {
-		ok, err := repo.IsAncestor(oldOID, newOID)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			ps.Add("", problem.RuleHistory, "main cannot be rewritten; add commits on top of it instead of force-pushing")
-			return ps, nil
-		}
-	}
-	newFS, err := repo.TreeFS(newOID)
-	if err != nil {
-		return nil, err
-	}
-	if kind == Workspace {
-		return workspace.Check(newFS), nil
-	}
-	all := catalog.Check(newFS)
-	if !gitrepo.IsZero(oldOID) {
-		oldFS, err := repo.TreeFS(oldOID)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, catalog.CheckImmutable(oldFS, newFS)...)
-	}
-	problem.Sort(all)
-	return all, nil
-}
-
 // Script returns a pre-receive hook that runs the custos binary at exe.
-func Script(exe string, kind Kind) (string, error) {
+func Script(exe string, opts ScriptOptions) (string, error) {
 	if strings.ContainsAny(exe, "'\n") {
 		return "", fmt.Errorf("cannot use %q in a hook script", exe)
 	}
-	return fmt.Sprintf("#!/bin/sh\nexec '%s' hook pre-receive --kind %s\n", exe, kind), nil
+	if err := opts.check(); err != nil {
+		return "", err
+	}
+	cmd := fmt.Sprintf("exec '%s' hook pre-receive --kind %s", exe, opts.Kind)
+	if opts.Kind == Workspace {
+		cmd += fmt.Sprintf(" --catalog '%s' --workspace %s", opts.CatalogDir, opts.WorkspaceID)
+	}
+	return "#!/bin/sh\n" + cmd + "\n", nil
 }

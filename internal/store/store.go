@@ -110,11 +110,11 @@ func (s *Store) InstallHooks() error {
 
 // installHook installs the hook of the catalog (id "") or of workspace id.
 func (s *Store) installHook(repo *gitrepo.Repo, id string) error {
-	kind := hook.Catalog
+	opts := hook.ScriptOptions{Kind: hook.Catalog}
 	if id != "" {
-		kind = hook.Workspace
+		opts = hook.ScriptOptions{Kind: hook.Workspace, CatalogDir: s.CatalogRepo().Dir, WorkspaceID: id}
 	}
-	script, err := hook.Script(s.exe, kind)
+	script, err := hook.Script(s.exe, opts)
 	if err != nil {
 		return err
 	}

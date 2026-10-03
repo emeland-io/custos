@@ -116,6 +116,20 @@ value: built by the release pipeline
 
 Markdown answers keep their text in the body and have no `value`.
 
+### Rules for a workspace's `main`
+
+Besides the format rules above (`format`, `path`, `previous`, `history`), a
+push to a workspace's `main` is checked against the server's catalog:
+
+| Rule | Meaning |
+| --- | --- |
+| `workspace-id` | `workspace` in `custos.yaml` is the id of the repository pushed to. |
+| `pin` | `catalog.commit` is a commit on the catalog's `main`, the current one or an older one. |
+| `answer` | Each answer names a task of the pinned catalog or a generated task, a `task_version` that exists, the task's answer type, and for `choice` one of its choices. |
+
+`custos validate` in a workspace checkout checks the workspace on its own;
+these three rules are checked on push.
+
 ## Command line
 
 ```sh

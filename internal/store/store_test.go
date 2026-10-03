@@ -119,7 +119,7 @@ func TestCreateWorkspace(t *testing.T) {
 	if who := gittest.Run(t, repo.Dir, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%s", "main"); who != "Jane Doe <jane@example.org>|custos-bot <custos-bot@localhost>|Create workspace "+fixture.WorkspaceID {
 		t.Errorf("commit %q", who)
 	}
-	if !strings.Contains(hookOf(t, repo.Dir), "'/custos' hook pre-receive --kind workspace") {
+	if want := "'/custos' hook pre-receive --kind workspace --catalog '" + s.CatalogRepo().Dir + "' --workspace " + fixture.WorkspaceID; !strings.Contains(hookOf(t, repo.Dir), want) {
 		t.Errorf("hook %q", hookOf(t, repo.Dir))
 	}
 	if ids, err := s.WorkspaceIDs(); err != nil || !slices.Equal(ids, []string{fixture.WorkspaceID}) {

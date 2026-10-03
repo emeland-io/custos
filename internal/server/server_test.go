@@ -152,6 +152,35 @@ func TestWorkspaces(t *testing.T) {
 	gittest.Run(t, clone, "push", "origin", "main")
 }
 
+// TestWorkspacePushesAreCheckedAgainstCatalog runs the hook with git's
+// quarantine environment, in which it must still read the catalog.
+func TestWorkspacePushesAreCheckedAgainstCatalog(t *testing.T) {
+	st, _, url := start(t)
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	clone := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", url+"/git/workspaces/"+fixture.WorkspaceID+".git", clone)
+	answer := "answers/" + fixture.TaskA + ".md"
+
+	for _, bad := range []struct{ path, content, want string }{
+		{answer, strings.Replace(fixture.AnswerFile, "1.0.0", "7.0.0", 1), answer + ": answer: task " + fixture.TaskA + " has no version 7.0.0"},
+		{"custos.yaml", fixture.Config("0f0e0d0c-0b0a-4908-8706-050403020100", fixture.Commit), "custos.yaml: workspace-id:"},
+		{"custos.yaml", fixture.Config(fixture.WorkspaceID, fixture.Commit), "custos.yaml: pin: catalog commit " + fixture.Commit + " does not exist"},
+	} {
+		gittest.Commit(t, clone, map[string]string{bad.path: bad.content})
+		if out, err := gittest.Try(clone, "push", "origin", "main"); err == nil || !strings.Contains(out, bad.want) {
+			t.Errorf("err %v, output:\n%s\nwant %q", err, out, bad.want)
+		}
+		gittest.Run(t, clone, "reset", "--quiet", "--hard", "origin/main")
+	}
+	gittest.Commit(t, clone, map[string]string{answer: fixture.AnswerFile})
+	gittest.Run(t, clone, "push", "origin", "main")
+}
+
 func TestOnCatalogPush(t *testing.T) {
 	_, srv, url := start(t)
 	calls := 0
