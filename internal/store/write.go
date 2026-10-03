@@ -166,14 +166,43 @@ func (s *Store) CheckWorkspace(id string) ([]problem.Problem, error) {
 
 // effective drops changes that leave tree as it is.
 func effective(tree fs.FS, changes []gitrepo.Change) []gitrepo.Change {
+	changes = lastPerPath(changes)
 	var out []gitrepo.Change
 	for _, c := range changes {
+		if c.Delete {
+			if info, err := fs.Stat(tree, c.Path); err == nil && info.IsDir() {
+				continue // nothing to delete: the path is a directory, not a file
+			}
+		}
 		cur, err := fs.ReadFile(tree, c.Path)
 		missing := errors.Is(err, fs.ErrNotExist)
 		if c.Delete && missing || !c.Delete && err == nil && bytes.Equal(cur, c.Data) {
 			continue
 		}
 		out = append(out, c)
+	}
+	return out
+}
+
+// lastPerPath keeps only the last change to each path, in the order its
+// first occurrence appeared: WriteCommit applies changes in order, so an
+// earlier change to a path that a later one in the same edit overrides
+// never reaches the tree and must not be judged against the base on its
+// own (it would otherwise be let through, or wrongly filtered out, by
+// comparing it to the base instead of to the change that actually wins).
+func lastPerPath(changes []gitrepo.Change) []gitrepo.Change {
+	latest := make(map[string]gitrepo.Change, len(changes))
+	for _, c := range changes {
+		latest[c.Path] = c
+	}
+	seen := make(map[string]bool, len(changes))
+	var out []gitrepo.Change
+	for _, c := range changes {
+		if seen[c.Path] {
+			continue
+		}
+		seen[c.Path] = true
+		out = append(out, latest[c.Path])
 	}
 	return out
 }

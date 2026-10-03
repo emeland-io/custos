@@ -8,10 +8,13 @@ import (
 	"sync"
 	"testing"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/problem"
 	"github.com/emeland-io/custos/internal/status"
+	"github.com/emeland-io/custos/internal/workspace"
 )
 
 var answerA = "answers/" + fixture.TaskA + ".md"
@@ -82,6 +85,61 @@ func TestUpdateWorkspaceMain(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestUpdateWorkspaceEffectiveLastChangeWins checks that effective() keeps
+// only the last change to a path before comparing against the base tree:
+// a change followed by one that reverts it to the base content must not
+// create a commit, even though each change individually looks real against
+// the base.
+func TestUpdateWorkspaceEffectiveLastChangeWins(t *testing.T) {
+	s, first := created(t)
+	commit, err := s.UpdateWorkspace(fixture.WorkspaceID, mainRef, jane, "noop", func(tree fs.FS) ([]gitrepo.Change, error) {
+		orig, err := fs.ReadFile(tree, workspace.ConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		var cfg workspace.Config
+		if err := yaml.Unmarshal(orig, &cfg); err != nil {
+			return nil, err
+		}
+		cfg.Frozen = true
+		tampered, err := workspace.MarshalConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return []gitrepo.Change{
+			{Path: workspace.ConfigPath, Data: tampered},
+			{Path: workspace.ConfigPath, Data: orig},
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit != first {
+		t.Errorf("a change reverted within the same edit must not create a commit, got %q want %q", commit, first)
+	}
+}
+
+// TestUpdateWorkspaceDeleteDirectoryIsNoop checks that deleting a path that
+// is a directory in the base tree, not a file, is a no-op: there is nothing
+// in the index to remove, so WriteCommit would otherwise still produce an
+// empty commit.
+func TestUpdateWorkspaceDeleteDirectoryIsNoop(t *testing.T) {
+	s, _ := created(t)
+	withAnswer, err := s.UpdateWorkspace(fixture.WorkspaceID, mainRef, jane, "answer", put(map[string]string{answerA: answerFile("1.1.0")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := s.UpdateWorkspace(fixture.WorkspaceID, mainRef, jane, "rm -r answers", func(fs.FS) ([]gitrepo.Change, error) {
+		return []gitrepo.Change{{Path: "answers", Delete: true}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit != withAnswer {
+		t.Errorf("deleting a directory path must be a no-op, got commit %q want %q (unchanged)", commit, withAnswer)
 	}
 }
 
