@@ -49,7 +49,8 @@ func Load(fsys fs.FS) (*Catalog, []problem.Problem) {
 // Validate checks the rules that span files.
 func (c *Catalog) Validate() []problem.Problem {
 	ps := c.Tasks.Check()
-	return append(ps, c.checkGroups()...)
+	ps = append(ps, c.checkGroups()...)
+	return append(ps, c.checkRegistry()...)
 }
 
 // Check loads and validates the catalog in fsys and returns all problems,
