@@ -172,6 +172,11 @@ func (s *Store) WorkspaceIDs() ([]string, error) {
 // ErrExists if it exists; error if the catalog has no main. Only the new
 // repository's hook is installed (ruling 1.8).
 func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error) {
+	if !task.ValidID(id) {
+		return &RejectedError{Problems: []problem.Problem{{
+			Rule: problem.RuleWorkspaceID, Message: fmt.Sprintf("workspace id %q is not a lowercase UUID v4", id),
+		}}}
+	}
 	unlock := s.Lock(id)
 	defer unlock()
 	pin, err := s.catalogMain()
@@ -182,16 +187,21 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			os.RemoveAll(repo.Dir)
-		}
-	}()
+	return s.finishCreateWorkspace(repo, id, author, pin)
+}
+
+// finishCreateWorkspace commits custos.yaml pinned to pin on repo's empty
+// main. The repository is removed on failure, except when the final
+// UpdateRef loses its compare-and-swap to a push that landed in the window
+// between CreateWorkspaceRepo and here: removing it then would erase a push
+// that was already accepted.
+func (s *Store) finishCreateWorkspace(repo *gitrepo.Repo, id string, author gitrepo.Signature, pin string) error {
 	config, err := workspace.MarshalConfig(workspace.Config{
 		Workspace: id,
 		Catalog:   workspace.CatalogPin{URL: s.CatalogURL(), Commit: pin},
 	})
 	if err != nil {
+		os.RemoveAll(repo.Dir)
 		return err
 	}
 	commit, err := repo.WriteCommit(gitrepo.CommitRequest{
@@ -200,12 +210,18 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 		Message: "Create workspace " + id,
 	})
 	if err != nil {
+		os.RemoveAll(repo.Dir)
 		return err
 	}
 	if err := s.validateMain(repo, id, "", commit); err != nil {
+		os.RemoveAll(repo.Dir)
 		return err
 	}
-	return conflict(repo.UpdateRef(mainRef, commit, ""))
+	err = conflict(repo.UpdateRef(mainRef, commit, ""))
+	if err != nil && !errors.Is(err, ErrConflict) {
+		os.RemoveAll(repo.Dir)
+	}
+	return err
 }
 
 // CreateWorkspaceRepo creates an empty bare repository with its hook (used by

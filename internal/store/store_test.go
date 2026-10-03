@@ -145,6 +145,22 @@ func TestCreateWorkspaceInvalidID(t *testing.T) {
 	}
 }
 
+// TestCreateWorkspaceInvalidIDBeforeCatalog checks that an invalid workspace
+// id is rejected even when the catalog has no main yet: the id is validated
+// before the workspace's lock is taken, so a bad id neither grows the lock
+// map nor is masked by the catalog-empty error.
+func TestCreateWorkspaceInvalidIDBeforeCatalog(t *testing.T) {
+	s, err := Open(t.TempDir(), "/custos", publicURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.CreateWorkspace("../escape", jane)
+	var rej *RejectedError
+	if !errors.As(err, &rej) || rej.Problems[0].Rule != problem.RuleWorkspaceID {
+		t.Errorf("invalid id on empty catalog: %v", err)
+	}
+}
+
 func TestCreateWorkspaceNeedsCatalog(t *testing.T) {
 	s, err := Open(t.TempDir(), "/custos", publicURL)
 	if err != nil {
@@ -178,6 +194,35 @@ func TestCreateWorkspaceIgnoresTagImpersonatingMain(t *testing.T) {
 	}
 	if ids, _ := s.WorkspaceIDs(); len(ids) != 0 {
 		t.Errorf("ids %v", ids)
+	}
+}
+
+// TestCreateWorkspaceConflictKeepsPush checks that when a push wins the
+// race for a brand-new workspace's main (the final UpdateRef's CAS fails
+// with ErrConflict), CreateWorkspace must not delete the repository: that
+// would erase the push that was just accepted.
+func TestCreateWorkspaceConflictKeepsPush(t *testing.T) {
+	s, pin := open(t)
+	repo, err := s.CreateWorkspaceRepo(fixture.WorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a push landing in the window between CreateWorkspaceRepo and
+	// the server's own commit.
+	pushed := gittest.Run(t, repo.Dir, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "pushed")
+	if err := repo.UpdateRef(mainRef, pushed, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.finishCreateWorkspace(repo, fixture.WorkspaceID, jane, pin)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("want ErrConflict, got %v", err)
+	}
+	if _, statErr := os.Stat(repo.Dir); statErr != nil {
+		t.Errorf("the repository with the accepted push must survive: %v", statErr)
+	}
+	if oid, _, _ := repo.ResolveRef(mainRef); oid != pushed {
+		t.Errorf("the push must not be overwritten, got %q", oid)
 	}
 }
 
