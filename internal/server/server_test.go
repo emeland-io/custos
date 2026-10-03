@@ -223,6 +223,28 @@ func TestWithContentLengthLimitsBody(t *testing.T) {
 		t.Error("inner handler ran for an oversized chunked body")
 	}
 
+	// A body with a Content-Length over the limit must be rejected up front
+	// too, not cut off inside the backend.
+	ran = false
+	req = httptest.NewRequest("POST", "/git/catalog.git/git-receive-pack", strings.NewReader(strings.Repeat("x", 64)))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "push too large") {
+		t.Errorf("code = %d body %q, want %d", rec.Code, rec.Body.String(), http.StatusRequestEntityTooLarge)
+	}
+	if ran {
+		t.Error("inner handler ran for an oversized body with Content-Length")
+	}
+
+	// A small body with Content-Length passes through unchanged.
+	ran = false
+	req = httptest.NewRequest("POST", "/git/catalog.git/git-receive-pack", strings.NewReader("small"))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !ran || gotLength != 5 {
+		t.Errorf("ran %v, ContentLength = %d, want 5", ran, gotLength)
+	}
+
 	// A small chunked body must still reach the inner handler with the
 	// right content length.
 	ran = false

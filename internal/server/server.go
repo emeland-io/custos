@@ -124,6 +124,10 @@ var maxRequestBytes int64 = 256 << 20 // 256 MiB
 // bodies because CGI needs CONTENT_LENGTH.
 func withContentLength(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBytes {
+			http.Error(w, "push too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		if r.ContentLength >= 0 && len(r.TransferEncoding) == 0 {
 			h.ServeHTTP(w, r)
