@@ -42,4 +42,7 @@ func (a *API) routes() {
 	a.Handle("POST /api/workspaces", a.createWorkspace)
 	a.Handle("GET /api/catalog", a.getCatalog)
 	a.Handle("GET /api/catalog/tasks/{id}", a.getCatalogTask)
+	a.Handle("GET /api/workspaces/{id}/status", a.getStatus)
+	a.Handle("GET /api/workspaces/{id}/book", a.getBook)
+	a.Handle("GET /api/workspaces/{id}/answers/{task}", a.getAnswer)
 }
