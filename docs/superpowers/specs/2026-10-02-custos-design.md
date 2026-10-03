@@ -447,3 +447,52 @@ One implementation plan per phase:
 - Running processors on Kubernetes or other remote runners.
 - Mirroring repos to an external Git forge.
 - Editing generated tasks by hand; they change only through processors.
+
+## 11. Implementation rulings
+
+Implementing a phase sometimes needs a decision that this spec does not
+settle, or one that departs from it. Each such decision is recorded here,
+with its reason and what it costs if it turns out wrong. A ruling that
+contradicts an earlier section takes precedence over it, until that section
+is revised.
+
+### 11.1 Phase 1 (Core)
+
+| # | Ruling | Reason | Cost if wrong |
+| --- | --- | --- | --- |
+| 1.1 | `go.mod` says `go 1.26.0` instead of `go 1.26`. | Both mean the same minimum version; `go mod tidy` writes the patch form because a dependency requires it. | A one-line edit. |
+| 1.2 | `Heads`, `Current` and `Superseded` of the task graph assume a graph without reference cycles; versions on a cycle are never current, so their tasks look merged. | Every validation path runs `Check` first, which rejects cycles. | A catalog with a cycle can show "merged" messages next to the cycle error, including from `task new-version`. |
+| 1.3 | The immutability check (rule 1) ignores layout problems in the previous `main`. | The previous `main` was accepted already; layout problems of the new tree are reported by the normal check. | An unreadable old tree would skip the immutability check. |
+| 1.4 | Request bodies below `/git/` are limited to 256 MiB (HTTP 413 above). | Prevents a client from filling the disk; attachments live outside Git, so pushes stay small. | Larger legitimate pushes are refused; the limit is one variable. |
+| 1.5 | The container image is based on Alpine with the packages `git` and `git-daemon`. | The server runs `git http-backend`, which Alpine ships in `git-daemon`. | A larger image than distroless. |
+| 1.6 | The pre-receive hook reads pushed files as raw blobs (`git ls-tree` + `git cat-file --batch`), not through `git archive`; symlinks and submodules are rejected on `main`. | `git archive` honours `.gitattributes`, which let a push hide files from validation. | None known. |
+| 1.7 | `custos validate DIR` checks the staged content (the Git index) when DIR is the root of a Git checkout, and the files on disk otherwise. | It is meant as a pre-commit hook, and untracked files such as `.DS_Store` must not count. | Unstaged edits are only checked after `git add`. |
+| 1.8 | `custos workspace create` only installs the hook of the new repository; `serve` rewrites all hooks at start. | Running the CLI from another path must not re-point the hooks of all repositories. | None known. |
+| 1.9 | A UTF-8 byte-order mark before the frontmatter is ignored. | Windows editors write one. | None known. |
+| 1.10 | The hook keeps a pushed tree in memory. | Catalogs and workspaces are small; the push limit bounds it. | Hook memory grows with the push size. |
+| 1.11 | Deferred to phase 2: checking that the `workspace` id in `custos.yaml` matches the repository it is pushed to. | Phase 2 owns the link between workspace repositories and their content. | Until then a workspace repository can carry another workspace's id. |
+
+### 11.2 Phase 2 (Flows)
+
+Rulings made while planning phase 2. Rulings made during its execution are
+added below them.
+
+| # | Ruling | Reason | Cost if wrong |
+| --- | --- | --- | --- |
+| 2.1 | Phase 2 is delivered as four plans, run in order: 2a store and status, 2b answers, blobs and REST API, 2c catalog distribution and freeze, 2d fork and merge. | One plan for all of §9 item 2 would be too large to review. | None. |
+| 2.2 | No SQLite index in phase 2 (§2, §7): status and the book are computed on demand from the Git trees. | A few thousand small files parse in milliseconds; an index adds a dependency and a cache to keep consistent. | If it gets slow, an index or cache has to be added later behind the same functions. |
+| 2.3 | Server-side changes are written with Git plumbing on the bare repositories (temporary index, `commit-tree`, `update-ref` with the expected old value), one lock per repository, and validated with the same rules as the pre-receive hook before the ref moves. | `update-ref` does not run hooks, and pushes can race with server writes. | A write that loses the race fails with a conflict and must be retried. |
+| 2.4 | A workspace's pin is resolved in the catalog repository of the same server; `catalog.url` in `custos.yaml` is informational and set from the server's public URL. | Workspaces hosted elsewhere sync back by push, so the server always holds the catalog they pin. | Workspaces pinned to a foreign catalog are not supported. |
+| 2.5 | Catalog changes are distributed in-process after a successful push to `catalog.git` and once at start-up, by an idempotent reconcile; Git hooks never write. | Hooks run inside `git receive-pack` and cannot take the server's repository locks. | A crash between the push and the reconcile delays distribution until the next push or restart. |
+| 2.6 | Until phase 4 adds authentication, write requests name their author in the header `X-Custos-Author: Name <email>`; the REST API is unauthenticated like Git over HTTP and listens on loopback by default. | Commits must be authored by a person (§6.4) before OIDC exists. | Anyone who can reach the port can write as anyone; same exposure as phase 1. |
+| 2.7 | One content-addressed blob store `<data-dir>/blobs/sha256/<hash>` serves all workspaces (§3.4 and §4.4 said one per workspace). | Forks then copy nothing, and identical files are stored once. | Per-workspace access control for blobs has to be enforced by the API in phase 4. |
+| 2.8 | A single uploaded blob is limited to 1 GiB. | Bounds disk use per request. | Larger attachments are refused; the limit is one variable. |
+| 2.9 | Workspace merges use `git merge-tree --write-tree`, which raises the Git requirement from 2.28 to 2.38. | It merges inside a bare repository without a work tree. | Hosts with an older Git cannot run the server. |
+| 2.10 | Until phase 3, merge conflicts in generated tasks and documents are resolved by choosing one side, like answer conflicts. | Rerunning processors (§4.4) needs the processor runner of phase 3. | Phase 3 must replace the choice with a rerun. |
+| 2.11 | The book is exported as Markdown, and status as JSON; HTML export comes with the web UI in phase 4. | HTML needs a Markdown renderer, which the UI brings anyway. | No HTML export until phase 4. |
+| 2.12 | The catalog API of phase 2 is read-only; drafting and publishing through the API comes with the Task-Author UI in phase 4. | Authors can work with Git and a text editor meanwhile. | Phase 4 grows by the catalog write API. |
+| 2.13 | Creating a workspace (CLI or API) makes an initial commit with `custos.yaml` pinned to the current catalog `main`, and fails while the catalog is empty. New flag `--public-url` (`CUSTOS_PUBLIC_URL`, default `http://127.0.0.1:8080`). | A workspace without a pin cannot show tasks. | The catalog must be pushed before the first workspace is created. |
+| 2.14 | Pushes to a workspace's `main` are also checked against the server: the `workspace` id must match the repository (resolves 1.11), the pin must be a commit on the catalog's `main`, and each answer must name an existing task version of the pinned catalog (or a generated task), with the same answer type and, for `choice`, one of its choices. New rule names `workspace-id`, `pin` and `answer`. | These checks need the catalog, which only the server holds. | None known. |
+| 2.15 | `custos validate` on a workspace checkout still checks the workspace on its own, without the catalog. | The catalog is not part of a workspace checkout. | Answer/task mismatches surface only on push. |
+| 2.16 | A pin may move to any commit on the catalog's `main`, also an older one. | The spec is silent; going back is useful to undo a pin move. | None known. |
+| 2.17 | Repository layout, hook installation and server-side writes move from package `server` into a new package `store`; `server` keeps HTTP only. | Fork, distribution and the API all create or write repositories. | None. |
