@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/emeland-io/custos/internal/server"
 )
 
 const workspaceUsage = "usage: custos workspace create [--data-dir DIR] WORKSPACE-UUID\n"
@@ -24,9 +26,11 @@ func runWorkspace(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, workspaceUsage)
 		return 2
 	}
-	srv, err := openServer(*dataDir)
+	// Only the new repository gets a hook; the hooks of existing ones stay
+	// as custos serve installed them.
+	exe, err := os.Executable()
 	if err == nil {
-		err = srv.CreateWorkspace(fl.Arg(0))
+		err = server.New(*dataDir, exe).CreateWorkspace(fl.Arg(0))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "custos workspace create: %v\n", err)

@@ -28,10 +28,17 @@ type Server struct {
 	exe      string
 }
 
-// Open prepares the data directory. exe is the custos binary the hooks run;
-// hooks are rewritten on every start, so moving the binary is safe.
+// New returns a server for the data directory without touching it. exe is
+// the custos binary the hooks of repositories it creates run.
+func New(dataDir, exe string) *Server {
+	return &Server{reposDir: filepath.Join(dataDir, "repos"), exe: exe}
+}
+
+// Open prepares the data directory for serving: it creates the catalog
+// repository if needed and rewrites the hooks of all repositories to run
+// exe, so moving the binary between starts is safe.
 func Open(dataDir, exe string) (*Server, error) {
-	s := &Server{reposDir: filepath.Join(dataDir, "repos"), exe: exe}
+	s := New(dataDir, exe)
 	wsDir := filepath.Join(s.reposDir, "workspaces")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		return nil, err
@@ -53,12 +60,17 @@ func Open(dataDir, exe string) (*Server, error) {
 	return s, nil
 }
 
-// CreateWorkspace creates the empty repository of a new workspace.
+// CreateWorkspace creates the empty repository of a new workspace. It
+// installs the hook of the new repository only and leaves the others alone.
 func (s *Server) CreateWorkspace(id string) error {
 	if !task.ValidID(id) {
 		return fmt.Errorf("workspace id %q is not a lowercase UUID v4", id)
 	}
-	dir := filepath.Join(s.reposDir, "workspaces", id+".git")
+	wsDir := filepath.Join(s.reposDir, "workspaces")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		return err
+	}
+	dir := filepath.Join(wsDir, id+".git")
 	if _, err := os.Stat(dir); err == nil {
 		return fmt.Errorf("workspace %s already exists", id)
 	}

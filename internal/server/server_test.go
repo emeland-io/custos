@@ -166,6 +166,35 @@ func TestOpenReinstallsHooks(t *testing.T) {
 	}
 }
 
+func TestCreateWorkspaceLeavesOtherHooks(t *testing.T) {
+	data := t.TempDir()
+	if _, err := Open(data, "/first/custos"); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(data, "/second/custos").CreateWorkspace(fixture.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	for repo, want := range map[string]string{
+		"catalog.git": "/first/custos",
+		"workspaces/" + fixture.WorkspaceID + ".git": "/second/custos",
+	} {
+		script, err := os.ReadFile(filepath.Join(data, "repos", repo, "hooks", "pre-receive"))
+		if err != nil || !strings.Contains(string(script), "'"+want+"' hook pre-receive") {
+			t.Errorf("%s hook: %q %v, want %s", repo, script, err, want)
+		}
+	}
+}
+
+func TestCreateWorkspaceInEmptyDataDir(t *testing.T) {
+	data := t.TempDir()
+	if err := New(data, "/custos").CreateWorkspace(fixture.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(data, "repos", "workspaces", fixture.WorkspaceID+".git", "hooks", "pre-receive")); err != nil {
+		t.Error(err)
+	}
+}
+
 func TestWithContentLengthLimitsBody(t *testing.T) {
 	old := maxRequestBytes
 	maxRequestBytes = 16
