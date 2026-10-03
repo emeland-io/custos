@@ -45,7 +45,7 @@ func TestServePublicURL(t *testing.T) {
 	if code != 0 || !strings.Contains(errs, `(default "http://127.0.0.1:8080")`) {
 		t.Errorf("code %d err %q", code, errs)
 	}
-	for _, bad := range []string{"127.0.0.1:8080", "ftp://x", "http://", "http://x/?a=b"} {
+	for _, bad := range []string{"127.0.0.1:8080", "ftp://x", "http://", "http://x/?a=b", "http://user:pass@host"} {
 		if code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir(), "--public-url", bad); code != 2 || !strings.Contains(errs, "--public-url") {
 			t.Errorf("%q: code %d err %q", bad, code, errs)
 		}

@@ -121,7 +121,7 @@ func publicURLFlag(fl *flag.FlagSet) *string {
 // checkPublicURL accepts absolute http and https URLs without query.
 func checkPublicURL(s string) error {
 	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || strings.Contains(s, "'") {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.Contains(s, "'") {
 		return fmt.Errorf("--public-url %q is not an absolute http or https URL such as %s", s, defaultPublicURL)
 	}
 	return nil
