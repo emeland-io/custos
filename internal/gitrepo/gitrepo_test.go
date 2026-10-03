@@ -84,6 +84,32 @@ func TestTreeFSRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestTreeFSIgnoresGitattributes(t *testing.T) {
+	dir := gittest.Init(t)
+	rev := gittest.Commit(t, dir, map[string]string{
+		".gitattributes": "* export-ignore\n*.txt eol=crlf export-subst\n",
+		"secret.txt":     "line one $Format:%H$\nline two\n",
+	})
+	fsys, err := (&Repo{Dir: dir}).TreeFS(rev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := fs.ReadFile(fsys, "secret.txt"); err != nil || string(data) != "line one $Format:%H$\nline two\n" {
+		t.Errorf("secret.txt = %q, %v", data, err)
+	}
+}
+
+func TestTreeFSRejectsSubmodules(t *testing.T) {
+	dir := gittest.Init(t)
+	first := gittest.Commit(t, dir, map[string]string{"a.txt": "one"})
+	gittest.Run(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+first+",sub")
+	gittest.Run(t, dir, "commit", "--quiet", "-m", "add submodule")
+	rev := gittest.Run(t, dir, "rev-parse", "HEAD")
+	if _, err := (&Repo{Dir: dir}).TreeFS(rev); err == nil || !strings.Contains(err.Error(), "sub: submodules are not supported") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestIsAncestor(t *testing.T) {
 	dir := gittest.Init(t)
 	c1 := gittest.Commit(t, dir, map[string]string{"a": "1"})

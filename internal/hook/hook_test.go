@@ -48,6 +48,19 @@ func TestChangedPublishedVersion(t *testing.T) {
 	fixture.WantProblem(t, check(t, dir, Catalog, update(c1, c2, "refs/heads/main")), path, problem.RuleImmutable, "was changed")
 }
 
+// TestGitattributesCannotHideFiles guards against .gitattributes hiding a
+// file from validation, for example with export-ignore.
+func TestGitattributesCannotHideFiles(t *testing.T) {
+	dir := gittest.Init(t)
+	c1 := gittest.Commit(t, dir, fixture.Catalog())
+	path := fixture.TaskPath(fixture.TaskA, "2.0.0")
+	c2 := gittest.Commit(t, dir, map[string]string{
+		path:             "not a task\n",
+		".gitattributes": path + " export-ignore\n",
+	})
+	fixture.WantProblem(t, check(t, dir, Catalog, update(c1, c2, "refs/heads/main")), path, problem.RuleFormat, "")
+}
+
 func TestDraftBranchesAreNotChecked(t *testing.T) {
 	dir := gittest.Init(t)
 	c1 := gittest.Commit(t, dir, map[string]string{"groups/index.yaml": "groups: [missing]\n"})
