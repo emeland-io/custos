@@ -1,108 +1,163 @@
 # custos
 
-custos manages small documentation fragments that describe tasks, and
-collects the answers to those tasks together with the in-toto attestations
-they require.
+custos manages documentation made of small fragments. A central **catalog**
+holds *tasks*: short descriptions of something an engineer has to do and
+document. Each product or project has a **workspace** that holds the
+*answers* to those tasks. Tasks are arranged in groups, so the answers of a
+workspace read like the chapters of a book.
 
-## Concepts
+The catalog and the workspaces are plain Git repositories. custos checks
+every change to their `main` branch and serves them over HTTP.
 
-| Element | Stored in | Purpose |
-| --- | --- | --- |
-| **Root** | root dir | Named entry point to a tree; points to its entry Node. |
-| **Node** | root dir | Inner element of the tree. Requires an in-toto attestation (predicate type, optional subject name and signer identities) and explains in Markdown why it is missing. Versioned. |
-| **Leaf** | root dir | A task, described in Markdown, below a Node. Versioned. |
-| **Seed** | work dir | One run over the tree of a Root. |
-| **Shoot** | work dir | The answer to a Leaf within a Seed. |
-| **Attestation** | work dir | An in-toto attestation uploaded for a Node within a Seed, with its verification result. |
+The design is in
+[docs/superpowers/specs/2026-10-02-custos-design.md](docs/superpowers/specs/2026-10-02-custos-design.md).
+This version implements its first phase: file formats, validation, Git over
+HTTP and the command line. Distributing catalog updates to workspaces,
+processors and the web UI follow.
 
-A Seed reports which Leaves still lack an answer and which Nodes still lack a
-verified attestation that meets their requirement.
-
-Creating a **new version** of a Node or Leaf copies it under a new ID and
-marks the old one superseded. Answers and attestations stay attached to the
-version they were made for, so they show up as *stale* until they are
-redone for the new version. Editing an element in place keeps its version.
-
-Every element is one JSON file named `<uuid>.json`:
+## Catalog
 
 ```text
-<root-dir>/roots/  <root-dir>/nodes/  <root-dir>/leaves/
-<work-dir>/seeds/  <work-dir>/shoots/  <work-dir>/attestations/
+tasks/<uuid>/<semver>.md     one file per task version
+groups/index.yaml            top-level groups, in book order
+groups/<slug>/group.yaml     title and ordered children
+processors.yaml              processors and the tasks they are bound to
 ```
 
-The root dir can be kept in git and edited outside custos; references that
-no longer resolve are logged at startup and reported in the Seed status.
+A task version:
 
-## Attestations
+```markdown
+---
+id: 3f1c2a4e-8b7d-4c1a-9e2f-1a2b3c4d5e6f
+version: 1.1.0
+title: Build the release binaries
+answer_type: markdown        # markdown, text, timestamp, path, url or choice
+previous:
+  - id: 3f1c2a4e-8b7d-4c1a-9e2f-1a2b3c4d5e6f
+    version: 1.0.0
+---
 
-Uploads can be DSSE envelopes, Sigstore bundles, or bare in-toto statements
-(stored as unsigned). Signatures are verified with the
-[carabiner-dev](https://github.com/carabiner-dev) libraries, see
-[docs/adr/0001-in-toto-library.md](docs/adr/0001-in-toto-library.md).
+Describe how the release binaries are built and where they are stored.
+```
 
-- Put trusted public keys (PEM or GPG) into the keys dir. The Keys page shows
-  the identity spec of each key, such as `key::ed25519::<id>`.
-- Sigstore bundles are verified offline against the embedded Sigstore trust
-  root. Require a keyless signer with a spec such as
-  `sigstore(identityMatch=prefix)::https://token.actions.githubusercontent.com::https://github.com/org/repo/`.
+`previous` links versions into a history graph that is separate from Git
+history. A version that lists versions of two tasks merges them. The current
+version of a task is the one no other version lists as previous.
+
+A group:
+
+```yaml
+title: Build environment
+children:
+  - group: toolchain                               # a sub-group, by slug
+  - task: 3f1c2a4e-8b7d-4c1a-9e2f-1a2b3c4d5e6f      # a task, by UUID
+```
+
+`groups/index.yaml` lists the top-level groups: `groups: [build, release]`.
+
+Processors are bound to tasks by UUID and pinned by digest:
+
+```yaml
+processors:
+  host-scanner:
+    image: registry.example.org/host-scanner@sha256:<64 hex digits>
+    timeout: 60s
+bindings:
+  3f1c2a4e-8b7d-4c1a-9e2f-1a2b3c4d5e6f: host-scanner
+```
+
+### Rules for `main`
+
+A push to `main` is rejected when it breaks one of these rules. Other
+branches are drafts and accept anything.
+
+| Rule | Meaning |
+| --- | --- |
+| `immutable` | A task version file on `main` never changes or disappears. Create a new version instead. |
+| `single-current` | Every task has one current version. Two versions that branch from the same version must be merged by a new version. |
+| `previous` | Previous references exist, point to a lower version of the same task, and form no cycle. |
+| `path` | Files are stored where their content says: `tasks/<id>/<version>.md`. |
+| `groups` | Groups form one tree below `groups/index.yaml` and list each task at most once. A task merged into another can no longer be listed. |
+| `bindings` | Bindings name existing, unmerged tasks and registered processors. |
+| `format` | Files parse, IDs are lowercase UUID v4, versions are semver such as `1.2.0`, unknown fields are not allowed. |
+| `history` | `main` cannot be deleted or force-pushed. |
+
+## Workspace
+
+```text
+custos.yaml                     workspace id and the catalog commit it uses
+answers/<task-uuid>.md          the answer to a task
+generated/<uuid>/<semver>.md    tasks made by processors
+documents/<uuid>.json           documents made by processors
+```
+
+```yaml
+# custos.yaml
+workspace: 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+catalog:
+  url: https://custos.example.org/git/catalog.git
+  commit: <full commit hash>
+```
+
+```markdown
+---
+task: 3f1c2a4e-8b7d-4c1a-9e2f-1a2b3c4d5e6f
+task_version: 1.1.0
+type: text
+value: built by the release pipeline
+---
+```
+
+Markdown answers keep their text in the body and have no `value`.
+
+## Command line
+
+```sh
+custos validate [--against REV] [DIR]     # check a catalog or workspace checkout
+custos task new-version --minor TASK-UUID # write the next version of a task
+custos workspace create WORKSPACE-UUID    # create an empty workspace repository
+custos serve                              # serve the repositories over HTTP
+```
+
+`custos validate --against origin/main` also reports task versions you
+changed that are already published; it fits a pre-commit hook. Run it in the
+repository root.
 
 ## Running
 
-Requires Go 1.26 and Node.js 22.
+Requires Go 1.26 and git 2.28 or later.
 
 ```sh
 make build
-./custos --root-dir ./data/root --work-dir ./data/work
+./custos serve --data-dir ./data
+git push http://127.0.0.1:8080/git/catalog.git main
 ```
 
-Then open <http://localhost:8080>.
+Repositories are served at `/git/catalog.git` and
+`/git/workspaces/<uuid>.git`. **There is no authentication yet**, so custos
+listens on `127.0.0.1:8080` by default.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
-| `--root-dir` | `CUSTOS_ROOT_DIR` | required |
-| `--work-dir` | `CUSTOS_WORK_DIR` | required |
-| `--keys-dir` | `CUSTOS_KEYS_DIR` | `<work-dir>/keys` |
-| `--addr` | `CUSTOS_ADDR` | `:8080` |
-| `--port` | `CUSTOS_PORT` | port of `--addr` (replaces only the port) |
-| `--no-banner` | `CUSTOS_NO_BANNER` | `false` (hide the container startup message) |
-| `--sigstore-online` | `CUSTOS_SIGSTORE_ONLINE` | `false` (allow Rekor lookups for keyless DSSE envelopes) |
+| `--data-dir` | `CUSTOS_DATA_DIR` | required |
+| `--addr` | `CUSTOS_ADDR` | `127.0.0.1:8080` |
 
-Flags win over environment variables.
+Flags win over environment variables. Run the built binary rather than
+`go run`: the repositories' hooks call the binary that started the server.
 
 ## Container image
 
-Images for linux/amd64 and linux/arm64 are published to
-`ghcr.io/emeland-io/custos` for every push to `main` (`main`, `latest`,
-`sha-<commit>`) and every `v*` tag (`1.2.3`, `1.2`). They carry SLSA
-provenance and an SBOM.
-
 ```sh
-docker run -p 9090:8080 \
-  -v custos-root:/data/root \
-  -v custos-work:/data/work \
-  ghcr.io/emeland-io/custos:latest
+make docker
+docker run -p 127.0.0.1:9090:8080 -v custos-data:/data custos:dev
 ```
 
-Then open <http://localhost:9090>. On startup the container prints these
-instructions; hide them with `--no-banner`.
-
-The image runs as a non-root user and keeps its data in two volumes: the
-root dir `/data/root` and the work dir `/data/work`; trusted keys go into
-`/data/work/keys`. To keep the root dir in a git checkout, bind-mount it
-instead, for example `-v "$PWD/tree:/data/root"`; it must be writable by
-UID 65532. To listen on another port inside the container, pass
-`--port <port>` and adjust the right side of `-p`. All settings can also be
-changed through the `CUSTOS_*` variables.
-
-`make docker` builds the image locally.
+The image runs as UID 65532, keeps its repositories in the volume `/data`,
+and listens on port 8080 inside the container.
 
 ## Development
 
 ```sh
-make dev-server   # API on :8080, data in ./tmp
-make dev-web      # Vite on :5173, proxies /api
-make test         # go vet, go test, frontend type check
+make test         # go vet and all tests; needs git on PATH
+make dev-server   # serve ./tmp/data on 127.0.0.1:8080
 ```
-
-The API lives below `/api`; see [internal/api/api.go](internal/api/api.go)
-for the routes.
