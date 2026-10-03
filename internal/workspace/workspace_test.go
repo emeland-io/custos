@@ -88,6 +88,10 @@ func TestCheckProblems(t *testing.T) {
 			documentPath, problem.RuleFormat, "verification.status"},
 		{"document without content", replace(documentPath, `"content":{"_type":"https://in-toto.io/Statement/v1"}`, `"content":null`),
 			documentPath, problem.RuleFormat, "content is missing"},
+		{"document with trailing data", func(f map[string]string) { f[documentPath] += " junk" },
+			documentPath, problem.RuleFormat, "unexpected data after the JSON object"},
+		{"document with a second object", func(f map[string]string) { f[documentPath] += "\n{}\n" },
+			documentPath, problem.RuleFormat, "unexpected data after the JSON object"},
 		{"document file name not a uuid", func(f map[string]string) {
 			f["documents/provenance.json"] = f[documentPath]
 			delete(f, documentPath)

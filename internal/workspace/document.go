@@ -3,6 +3,8 @@ package workspace
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"slices"
 	"strings"
 
@@ -41,6 +43,10 @@ func (w *Workspace) loadDocument(path string, data []byte) []problem.Problem {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
 		ps.Add(path, problem.RuleFormat, "%v", err)
+		return ps
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		ps.Add(path, problem.RuleFormat, "unexpected data after the JSON object")
 		return ps
 	}
 	d.Path = path
