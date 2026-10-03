@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing/fstest"
@@ -19,6 +20,39 @@ import (
 // Repo is a git repository, bare or not, at Dir.
 type Repo struct {
 	Dir string
+	// InheritGitEnv keeps the environment variables that point git at a
+	// repository and its objects (GIT_DIR, GIT_OBJECT_DIRECTORY, ...). Only
+	// the repository a pre-receive hook runs in sets it, because git passes
+	// the quarantined objects of the push that way. Every other Repo drops
+	// them, so that a hook can also read a second repository.
+	InheritGitEnv bool
+}
+
+// repoEnv lists the variables that make git use another repository, object
+// store or index than the one at Dir.
+var repoEnv = []string{
+	"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_QUARANTINE_PATH", "GIT_COMMON_DIR",
+	"GIT_NAMESPACE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_PREFIX",
+}
+
+// cleanEnv returns the process environment without the variables in repoEnv.
+func cleanEnv() []string {
+	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(repoEnv, name)
+	})
+}
+
+// command prepares git with args in r.Dir, with extra environment variables.
+func (r *Repo) command(env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", r.Dir}, args...)...)
+	base := cleanEnv()
+	if r.InheritGitEnv {
+		base = os.Environ()
+	}
+	cmd.Env = append(base, env...)
+	return cmd
 }
 
 // IsZero reports whether oid is the all-zero object ID git uses for a ref
@@ -30,7 +64,9 @@ func IsZero(oid string) bool {
 // InitBare creates a bare repository with main as its initial branch that
 // accepts pushes over HTTP.
 func InitBare(dir string) (*Repo, error) {
-	if out, err := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch=main", dir).CombinedOutput(); err != nil {
+	cmd := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch=main", dir)
+	cmd.Env = cleanEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("git init %s: %w: %s", dir, err, bytes.TrimSpace(out))
 	}
 	r := &Repo{Dir: dir}
@@ -68,8 +104,8 @@ func (r *Repo) IsAncestor(a, b string) (bool, error) {
 // eol conversion) cannot change or hide what is validated. Symlinks and
 // submodules are rejected, because custos cannot validate what they point to.
 func (r *Repo) TreeFS(rev string) (fs.FS, error) {
-	if rev == "" || strings.HasPrefix(rev, "-") {
-		return nil, fmt.Errorf("invalid revision %q", rev)
+	if err := checkRev(rev); err != nil {
+		return nil, err
 	}
 	out, err := r.git("ls-tree", "-r", "-z", "--full-tree", rev)
 	if err != nil {
@@ -158,7 +194,7 @@ func (r *Repo) entriesFS(entries []entry) (fstest.MapFS, error) {
 
 // readBlobs reads the contents of blobs with a single git cat-file process.
 func (r *Repo) readBlobs(oids []string) ([][]byte, error) {
-	cmd := exec.Command("git", "-C", r.Dir, "cat-file", "--batch")
+	cmd := r.command(nil, "cat-file", "--batch")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
@@ -219,11 +255,27 @@ func parseBatch(br *bufio.Reader, oids []string) ([][]byte, error) {
 }
 
 func (r *Repo) git(args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", r.Dir}, args...)...)
+	return r.run(nil, nil, args...)
+}
+
+// run runs git with extra environment variables and stdin (nil for none).
+func (r *Repo) run(env []string, stdin []byte, args ...string) ([]byte, error) {
+	cmd := r.command(env, args...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// checkRev rejects revisions git would read as an option.
+func checkRev(rev string) error {
+	if rev == "" || strings.HasPrefix(rev, "-") {
+		return fmt.Errorf("invalid revision %q", rev)
+	}
+	return nil
 }

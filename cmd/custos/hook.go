@@ -28,7 +28,7 @@ func runHook(args []string, stdin io.Reader, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos hook: %v\n", err)
 		return 2
 	}
-	ps, err := hook.PreReceive(&gitrepo.Repo{Dir: "."}, kind, stdin)
+	ps, err := hook.PreReceive(&gitrepo.Repo{Dir: ".", InheritGitEnv: true}, kind, stdin)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos hook: %v\n", err)
 		return 1
