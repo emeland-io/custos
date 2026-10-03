@@ -35,4 +35,7 @@ func (a *API) Handle(pattern string, h http.HandlerFunc) { a.mux.HandleFunc(patt
 func (a *API) Handler() http.Handler { return a.mux }
 
 // routes registers the endpoints of this package.
-func (a *API) routes() {}
+func (a *API) routes() {
+	a.Handle("POST /api/blobs", a.postBlob)
+	a.Handle("GET /api/blobs/{sha256}", a.getBlob) // GET patterns also match HEAD
+}
