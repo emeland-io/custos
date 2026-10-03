@@ -201,6 +201,21 @@ func TestOnCatalogPush(t *testing.T) {
 	}
 }
 
+// TestOnCatalogPushWithoutDotGit checks that a push to /git/catalog (the
+// alias git http-backend also serves alongside /git/catalog.git) still fires
+// OnCatalogPush; plan 2c depends on this callback.
+func TestOnCatalogPushWithoutDotGit(t *testing.T) {
+	_, srv, url := start(t)
+	calls := 0
+	srv.OnCatalogPush(func() { calls++ })
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog", "main")
+	if calls != 1 {
+		t.Fatalf("%d calls after one push to /git/catalog", calls)
+	}
+}
+
 func TestWithContentLengthLimitsBody(t *testing.T) {
 	old := maxRequestBytes
 	maxRequestBytes = 16

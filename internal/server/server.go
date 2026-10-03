@@ -10,13 +10,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/emeland-io/custos/internal/store"
 )
 
-// catalogPushPath is the request that carries a push to the catalog.
-const catalogPushPath = "/git/catalog.git/git-receive-pack"
+// catalogPushPaths are the requests that carry a push to the catalog: git
+// http-backend serves both the repository's real name and the alias
+// without ".git".
+var catalogPushPaths = [2]string{
+	"/git/catalog.git/git-receive-pack",
+	"/git/catalog/git-receive-pack",
+}
 
 // Server serves the repositories of a store. Repository layout, hooks and
 // writes belong to the store (ruling 2.17).
@@ -30,9 +36,10 @@ type Server struct {
 // New returns a server for st.
 func New(st *store.Store) *Server { return &Server{st: st} }
 
-// OnCatalogPush registers f to be called after each request to
-// /git/catalog.git/git-receive-pack completes, whether the push was accepted
-// or not. f runs before the response ends, so the pusher waits for it.
+// OnCatalogPush registers f to be called after each request to push the
+// catalog (/git/catalog.git/git-receive-pack, or the /git/catalog alias)
+// completes, whether the push was accepted or not. f runs before the
+// response ends, so the pusher waits for it.
 func (s *Server) OnCatalogPush(f func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,7 +70,7 @@ func (s *Server) Handler() (http.Handler, error) {
 func (s *Server) notifyCatalogPush(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
-		if r.Method != http.MethodPost || r.URL.Path != catalogPushPath {
+		if r.Method != http.MethodPost || !slices.Contains(catalogPushPaths[:], r.URL.Path) {
 			return
 		}
 		s.mu.Lock()
