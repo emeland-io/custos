@@ -82,6 +82,10 @@ branches are drafts and accept anything.
 | `format` | Files parse, IDs are lowercase UUID v4, versions are semver such as `1.2.0`, unknown fields are not allowed. |
 | `history` | `main` cannot be deleted or force-pushed. |
 
+Symlinks and submodules are rejected on `main` of the catalog and of
+workspaces, because custos cannot validate what they point to. Files are
+checked as stored in Git; `.gitattributes` does not change what is checked.
+
 ## Workspace
 
 ```text
@@ -113,11 +117,18 @@ Markdown answers keep their text in the body and have no `value`.
 ## Command line
 
 ```sh
-custos validate [--against REV] [DIR]     # check a catalog or workspace checkout
-custos task new-version --minor TASK-UUID # write the next version of a task
-custos workspace create WORKSPACE-UUID    # create an empty workspace repository
-custos serve                              # serve the repositories over HTTP
+custos validate [--against REV] [DIR]                    # check a catalog or workspace checkout
+custos task new-version --minor TASK-UUID                # write the next version (or --patch, --major)
+custos workspace create [--data-dir DIR] WORKSPACE-UUID  # create an empty workspace repository
+custos serve [--data-dir DIR] [--addr ADDR]              # serve the repositories over HTTP
 ```
+
+`workspace create` and `serve` need `--data-dir` or `CUSTOS_DATA_DIR`.
+
+In the root of a git checkout, `custos validate` checks the staged content
+(the git index), which is what the next commit will hold: untracked and
+ignored files such as `.DS_Store` and unstaged edits are not checked. In any
+other directory it checks the files on disk.
 
 `custos validate --against origin/main` also reports task versions you
 changed that are already published; it fits a pre-commit hook. Run it in the
@@ -134,8 +145,16 @@ git push http://127.0.0.1:8080/git/catalog.git main
 ```
 
 Repositories are served at `/git/catalog.git` and
-`/git/workspaces/<uuid>.git`. **There is no authentication yet**, so custos
-listens on `127.0.0.1:8080` by default.
+`/git/workspaces/<uuid>.git`; `GET /healthz` answers `ok` while the server
+runs. **There is no authentication yet**, so custos listens on
+`127.0.0.1:8080` by default.
+
+A workspace repository must be created before its first push:
+
+```sh
+./custos workspace create --data-dir ./data 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+git push http://127.0.0.1:8080/git/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9.git main
+```
 
 | Flag | Environment | Default |
 | --- | --- | --- |
@@ -149,11 +168,12 @@ Flags win over environment variables. Run the built binary rather than
 
 ```sh
 make docker
-docker run -p 127.0.0.1:9090:8080 -v custos-data:/data custos:dev
+docker run -d --name custos -p 127.0.0.1:9090:8080 -v custos-data:/data custos:dev
+docker exec custos custos workspace create 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
 ```
 
-The image runs as UID 65532, keeps its repositories in the volume `/data`,
-and listens on port 8080 inside the container.
+The image runs as UID 65532, keeps its repositories in the volume `/data`
+(`CUSTOS_DATA_DIR=/data`), and listens on port 8080 inside the container.
 
 ## Development
 
