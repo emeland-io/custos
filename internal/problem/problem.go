@@ -18,6 +18,11 @@ const (
 	RuleGroups        = "groups"         // rule 5
 	RuleBindings      = "bindings"       // rule 6
 	RuleHistory       = "history"        // main was deleted or rewritten
+
+	// Workspace rules that need the server's catalog (ruling 2.14).
+	RuleWorkspaceID = "workspace-id" // custos.yaml names another workspace than the repository
+	RulePin         = "pin"          // the pinned commit is not on the catalog's main
+	RuleAnswer      = "answer"       // an answer does not fit the task version it names
 )
 
 // Problem is one rule violation in one file.
