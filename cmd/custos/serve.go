@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,9 +43,15 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	hs := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	// Bind before announcing, so "listening" is only printed when it is true.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		fmt.Fprintf(stderr, "custos serve: %v\n", err)
+		return 1
+	}
+	hs := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
-	go func() { errc <- hs.ListenAndServe() }()
+	go func() { errc <- hs.Serve(ln) }()
 	fmt.Fprintf(stdout, "custos listening on %s, repositories in %s\n", *addr, *dataDir)
 	select {
 	case err := <-errc:
