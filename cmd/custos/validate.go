@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/emeland-io/custos/internal/catalog"
 	"github.com/emeland-io/custos/internal/gitrepo"
@@ -14,8 +17,9 @@ import (
 	"github.com/emeland-io/custos/internal/workspace"
 )
 
-// runValidate checks a catalog or workspace checkout. A directory holding
-// custos.yaml is a workspace; anything else is a catalog.
+// runValidate checks a catalog or workspace checkout: the staged content
+// when DIR is the root of a git work tree, the files on disk otherwise.
+// Content holding custos.yaml is a workspace; anything else is a catalog.
 func runValidate(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fl.SetOutput(stderr)
@@ -31,9 +35,13 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	if fl.NArg() == 1 {
 		dir = fl.Arg(0)
 	}
-	fsys := os.DirFS(dir)
+	fsys, err := filesToValidate(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "custos validate: %v\n", err)
+		return 1
+	}
 	var ps []problem.Problem
-	if _, err := os.Stat(filepath.Join(dir, "custos.yaml")); err == nil {
+	if _, err := fs.Stat(fsys, "custos.yaml"); err == nil {
 		if *against != "" {
 			fmt.Fprintln(stderr, "custos validate: --against only applies to catalogs")
 			return 2
@@ -60,6 +68,35 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "ok")
 	return 0
+}
+
+// filesToValidate returns what the next commit would hold when dir is the
+// root of a git work tree: the index, so that untracked and ignored files
+// (.DS_Store, editor swap files) and unstaged edits are not checked, which
+// also makes validate usable as a pre-commit hook. Any other directory is
+// checked as it is on disk.
+func filesToValidate(dir string) (fs.FS, error) {
+	if isWorkTreeRoot(dir) {
+		return (&gitrepo.Repo{Dir: dir}).IndexFS()
+	}
+	return os.DirFS(dir), nil
+}
+
+func isWorkTreeRoot(dir string) bool {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return false
+	}
+	top, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	abs, err = filepath.Abs(abs)
+	return err == nil && abs == top
 }
 
 // helpOrUsage maps a flag parsing error to an exit code: -h is not an error.

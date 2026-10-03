@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gittest"
 )
 
@@ -106,6 +107,41 @@ func TestTreeFSRejectsSubmodules(t *testing.T) {
 	gittest.Run(t, dir, "commit", "--quiet", "-m", "add submodule")
 	rev := gittest.Run(t, dir, "rev-parse", "HEAD")
 	if _, err := (&Repo{Dir: dir}).TreeFS(rev); err == nil || !strings.Contains(err.Error(), "sub: submodules are not supported") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestIndexFS(t *testing.T) {
+	dir := gittest.Init(t)
+	gittest.Commit(t, dir, map[string]string{"a.txt": "one", "sub/b.txt": "two"})
+	fixture.WriteDir(t, dir, map[string]string{"a.txt": "staged", "sub/b.txt": "unstaged", "untracked.txt": "x"})
+	gittest.Run(t, dir, "add", "a.txt")
+	fsys, err := (&Repo{Dir: dir}).IndexFS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := fs.ReadFile(fsys, "a.txt"); string(data) != "staged" {
+		t.Errorf("a.txt = %q", data)
+	}
+	if data, _ := fs.ReadFile(fsys, "sub/b.txt"); string(data) != "two" {
+		t.Errorf("sub/b.txt = %q", data)
+	}
+	if _, err := fs.Stat(fsys, "untracked.txt"); err == nil {
+		t.Error("untracked.txt must not be in the index")
+	}
+}
+
+func TestIndexFSRejectsConflicts(t *testing.T) {
+	dir := gittest.Init(t)
+	gittest.Commit(t, dir, map[string]string{"a.txt": "base"})
+	gittest.Run(t, dir, "checkout", "--quiet", "-b", "other")
+	gittest.Commit(t, dir, map[string]string{"a.txt": "other"})
+	gittest.Run(t, dir, "checkout", "--quiet", "main")
+	gittest.Commit(t, dir, map[string]string{"a.txt": "main"})
+	if _, err := gittest.Try(dir, "merge", "other"); err == nil {
+		t.Fatal("merge must conflict")
+	}
+	if _, err := (&Repo{Dir: dir}).IndexFS(); err == nil || !strings.Contains(err.Error(), "a.txt: unmerged") {
 		t.Errorf("err = %v", err)
 	}
 }
