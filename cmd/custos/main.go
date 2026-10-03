@@ -31,6 +31,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "validate":
+		return runValidate(args[1:], stdout, stderr)
+	case "task":
+		return runTask(args[1:], stdout, stderr)
+	case "hook":
+		return runHook(args[1:], stdin, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
