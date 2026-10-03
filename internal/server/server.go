@@ -27,7 +27,8 @@ var catalogPushPaths = [2]string{
 // Server serves the repositories of a store. Repository layout, hooks and
 // writes belong to the store (ruling 2.17).
 type Server struct {
-	st *store.Store
+	st  *store.Store
+	api http.Handler // mounted at /api/ when set
 
 	mu            sync.Mutex
 	onCatalogPush []func()
@@ -35,6 +36,13 @@ type Server struct {
 
 // New returns a server for st.
 func New(st *store.Store) *Server { return &Server{st: st} }
+
+// WithAPI mounts h at /api/ in the handler that Handler returns. h sees the
+// full path, including /api/. It returns s.
+func (s *Server) WithAPI(h http.Handler) *Server {
+	s.api = h
+	return s
+}
 
 // OnCatalogPush registers f to be called after each request to push the
 // catalog (/git/catalog.git/git-receive-pack, or the /git/catalog alias)
@@ -64,6 +72,9 @@ func (s *Server) Handler() (http.Handler, error) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	if s.api != nil {
+		mux.Handle("/api/", s.api)
+	}
 	return mux, nil
 }
 

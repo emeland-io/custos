@@ -110,7 +110,13 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 			fmt.Fprintf(stderr, "custos serve: workspace %s is inconsistent: %s\n", id, p)
 		}
 	}
-	return server.New(st), nil
+	a, err := openAPI(st)
+	if err != nil {
+		return nil, err
+	}
+	srv := server.New(st)
+	srv.WithAPI(a.Handler())
+	return srv, nil
 }
 
 // publicURLFlag defines --public-url.
