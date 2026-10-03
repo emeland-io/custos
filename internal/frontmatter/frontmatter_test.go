@@ -14,6 +14,8 @@ func TestSplit(t *testing.T) {
 		{name: "no final newline", in: "---\na: 1\n---", meta: "a: 1\n", body: ""},
 		{name: "empty frontmatter", in: "---\n---\nbody\n", meta: "", body: "body\n"},
 		{name: "body contains a rule", in: "---\na: 1\n---\nx\n---\ny\n", meta: "a: 1\n", body: "x\n---\ny\n"},
+		{name: "byte-order mark", in: "\uFEFF---\na: 1\n---\n\nbody\n", meta: "a: 1\n", body: "body\n"},
+		{name: "only one byte-order mark", in: "\uFEFF\uFEFF---\na: 1\n---\n", wantErr: true},
 		{name: "missing start", in: "a: 1\n", wantErr: true},
 		{name: "missing end", in: "---\na: 1\n", wantErr: true},
 		{name: "empty file", in: "", wantErr: true},

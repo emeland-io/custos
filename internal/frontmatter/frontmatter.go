@@ -14,9 +14,11 @@ import (
 
 // Split separates data into its frontmatter and its body. Windows line
 // endings become "\n", and a missing final newline is added. One blank line
-// after the closing "---" is not part of the body.
+// after the closing "---" is not part of the body. One leading UTF-8
+// byte-order mark, which some Windows editors write, is ignored.
 func Split(data []byte) (meta []byte, body string, err error) {
-	s := strings.ReplaceAll(string(data), "\r\n", "\n")
+	s := strings.TrimPrefix(string(data), "\uFEFF")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
 	if !strings.HasPrefix(s, "---\n") {
 		return nil, "", errors.New(`file must start with a "---" line`)
 	}
