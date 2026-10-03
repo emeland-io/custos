@@ -13,9 +13,9 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     go build -trimpath -ldflags='-s -w' -o /out/custos ./cmd/custos
 
 # custos stores everything in git repositories and serves them through
-# git http-backend, so the runtime image needs git.
+# git http-backend (Alpine package git-daemon), so the runtime image needs git and git http-backend.
 FROM alpine:3.22
-RUN apk add --no-cache git \
+RUN apk add --no-cache git git-daemon \
  && adduser -D -u 65532 -h /home/custos custos \
  && mkdir -p /data && chown 65532:65532 /data
 COPY --from=build /out/custos /usr/local/bin/custos
