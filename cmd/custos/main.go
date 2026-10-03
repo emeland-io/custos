@@ -15,6 +15,7 @@ Usage:
   custos validate [--against REV] [DIR]
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
   custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID
+  custos clone URL DIR
 
 Run "custos COMMAND -h" for the flags of a command.
 `
@@ -41,6 +42,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runWorkspace(args[1:], stdout, stderr)
 	case "hook":
 		return runHook(args[1:], stdin, stderr)
+	case "clone":
+		return runClone(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
