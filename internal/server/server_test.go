@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -162,6 +163,51 @@ func TestOpenReinstallsHooks(t *testing.T) {
 		if err != nil || !strings.Contains(string(script), "'/third/custos' hook pre-receive") {
 			t.Errorf("%s hook: %q %v", repo, script, err)
 		}
+	}
+}
+
+func TestWithContentLengthLimitsBody(t *testing.T) {
+	old := maxRequestBytes
+	maxRequestBytes = 16
+	t.Cleanup(func() { maxRequestBytes = old })
+
+	var ran bool
+	var gotLength int64
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+		gotLength = r.ContentLength
+	})
+	h := withContentLength(inner)
+
+	// A chunked body over the limit must be rejected before the inner
+	// handler runs.
+	ran = false
+	req := httptest.NewRequest("POST", "/git/catalog.git/git-receive-pack", strings.NewReader(strings.Repeat("x", 64)))
+	req.TransferEncoding = []string{"chunked"}
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("code = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+	if ran {
+		t.Error("inner handler ran for an oversized chunked body")
+	}
+
+	// A small chunked body must still reach the inner handler with the
+	// right content length.
+	ran = false
+	body := "small"
+	req = httptest.NewRequest("POST", "/git/catalog.git/git-receive-pack", strings.NewReader(body))
+	req.TransferEncoding = []string{"chunked"}
+	req.ContentLength = -1
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !ran {
+		t.Error("inner handler did not run for a small chunked body")
+	}
+	if gotLength != int64(len(body)) {
+		t.Errorf("ContentLength = %d, want %d", gotLength, len(body))
 	}
 }
 

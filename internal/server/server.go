@@ -101,11 +101,18 @@ func (s *Server) Handler() (http.Handler, error) {
 	return mux, nil
 }
 
+// maxRequestBytes bounds every request body below /git/, chunked or not, so
+// that a client cannot exhaust disk by streaming an unbounded push: catalogs
+// and workspaces keep attachments outside git, so legitimate pushes stay
+// small. It is a var, not a const, so tests can lower it temporarily.
+var maxRequestBytes int64 = 256 << 20 // 256 MiB
+
 // withContentLength buffers chunked request bodies in a temporary file.
 // git sends pushes above 1 MiB chunked, and net/http/cgi rejects chunked
 // bodies because CGI needs CONTENT_LENGTH.
 func withContentLength(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		if r.ContentLength >= 0 && len(r.TransferEncoding) == 0 {
 			h.ServeHTTP(w, r)
 			return
@@ -122,6 +129,11 @@ func withContentLength(h http.Handler) http.Handler {
 			_, err = f.Seek(0, io.SeekStart)
 		}
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "push too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
