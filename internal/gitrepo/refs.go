@@ -34,20 +34,29 @@ func (r *Repo) ResolveRef(ref string) (oid string, ok bool, err error) {
 
 // resolveExactRef resolves name as the literal ref name, bypassing rev-parse's
 // DWIM lookup, optionally peeling the result to the commit it points at.
+//
+// Unlike "show-ref --verify", "for-each-ref" exits 0 with no output for a
+// missing ref and only fails for a missing/broken repository, so a broken
+// repository is reported as an error rather than silently treated as a
+// missing ref. for-each-ref matches name as a prefix (e.g. a pattern of
+// refs/heads/main also matches refs/heads/main/x), so the refname of each
+// result is compared against name exactly.
 func (r *Repo) resolveExactRef(name string, peelToCommit bool) (string, bool, error) {
-	out, err := r.git("show-ref", "--verify", "--", name)
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return "", false, nil
-	}
+	out, err := r.git("for-each-ref", "--format=%(objectname) %(refname)", "--", name)
 	if err != nil {
 		return "", false, err
 	}
-	oid, _, _ := strings.Cut(strings.TrimSpace(string(out)), " ")
-	if !peelToCommit {
-		return oid, true, nil
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		oid, refname, found := strings.Cut(line, " ")
+		if !found || refname != name {
+			continue
+		}
+		if !peelToCommit {
+			return oid, true, nil
+		}
+		return r.revParseVerify(oid + commitSuffix)
 	}
-	return r.revParseVerify(oid + commitSuffix)
+	return "", false, nil
 }
 
 // revParseVerify resolves rev with rev-parse's usual DWIM lookup; used for

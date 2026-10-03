@@ -29,6 +29,9 @@ func TestResolveRef(t *testing.T) {
 	if _, _, err := (&Repo{Dir: filepath.Join(t.TempDir(), "none")}).ResolveRef("main"); err == nil {
 		t.Error("a missing repository must be an error, not a missing ref")
 	}
+	if _, _, err := (&Repo{Dir: filepath.Join(t.TempDir(), "none")}).ResolveRef("refs/heads/main"); err == nil {
+		t.Error("a missing repository must be an error for a refs/… name too, not a missing ref")
+	}
 }
 
 // TestResolveRefExactRefName checks that a fully qualified ref name
