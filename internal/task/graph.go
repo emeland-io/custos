@@ -58,6 +58,9 @@ func (g *Graph) Tasks() []string { return slices.Sorted(maps.Keys(g.byTask)) }
 func (g *Graph) Versions(id string) []*Version { return g.byTask[id] }
 
 // Heads returns the versions of task id that no version lists as previous.
+// In a graph with a reference cycle (reported by Check), versions on the cycle
+// are never heads, so Heads, Current and Superseded are only meaningful once
+// Check reports no cycle.
 func (g *Graph) Heads(id string) []*Version {
 	var hs []*Version
 	for _, v := range g.byTask[id] {
@@ -69,7 +72,8 @@ func (g *Graph) Heads(id string) []*Version {
 }
 
 // Current returns the current version of task id. It fails when the task
-// is superseded or has several heads.
+// is superseded or has several heads. Only meaningful when Check reports no
+// reference cycle.
 func (g *Graph) Current(id string) (*Version, bool) {
 	hs := g.Heads(id)
 	if len(hs) != 1 {
@@ -80,6 +84,7 @@ func (g *Graph) Current(id string) (*Version, bool) {
 
 // Superseded reports whether all versions of task id are listed as previous
 // by other versions, which happens when the task was merged into another.
+// Only meaningful when Check reports no reference cycle.
 func (g *Graph) Superseded(id string) bool { return g.Has(id) && len(g.Heads(id)) == 0 }
 
 // Check reports broken previous references (rule 3), tasks with more than
