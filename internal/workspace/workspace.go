@@ -15,7 +15,8 @@ import (
 	"github.com/emeland-io/custos/internal/task"
 )
 
-const configPath = "custos.yaml"
+// ConfigPath is the path of the workspace configuration file.
+const ConfigPath = "custos.yaml"
 
 var (
 	answerLayout    = regexp.MustCompile(`^answers/[^/]+\.md$`)
@@ -86,22 +87,22 @@ func Check(fsys fs.FS) []problem.Problem {
 }
 
 func (w *Workspace) loadConfig(fsys fs.FS) []problem.Problem {
-	found, rps := repofile.ReadYAML(fsys, configPath, &w.Config)
+	found, rps := repofile.ReadYAML(fsys, ConfigPath, &w.Config)
 	ps := problem.List(rps)
 	if !found {
-		ps.Add(configPath, problem.RuleFormat, "custos.yaml is missing; a workspace needs it to name its catalog")
+		ps.Add(ConfigPath, problem.RuleFormat, "custos.yaml is missing; a workspace needs it to name its catalog")
 	}
 	if !found || len(rps) > 0 {
 		return ps
 	}
 	if !task.ValidID(w.Config.Workspace) {
-		ps.Add(configPath, problem.RuleFormat, "workspace %q is not a lowercase UUID v4", w.Config.Workspace)
+		ps.Add(ConfigPath, problem.RuleFormat, "workspace %q is not a lowercase UUID v4", w.Config.Workspace)
 	}
 	if strings.TrimSpace(w.Config.Catalog.URL) == "" {
-		ps.Add(configPath, problem.RuleFormat, "catalog.url is missing")
+		ps.Add(ConfigPath, problem.RuleFormat, "catalog.url is missing")
 	}
 	if !commitRE.MatchString(w.Config.Catalog.Commit) {
-		ps.Add(configPath, problem.RuleFormat, "catalog.commit %q is not a full commit hash", w.Config.Catalog.Commit)
+		ps.Add(ConfigPath, problem.RuleFormat, "catalog.commit %q is not a full commit hash", w.Config.Catalog.Commit)
 	}
 	return ps
 }

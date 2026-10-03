@@ -80,11 +80,24 @@ const DocumentFile = `{"match_key":"slsa:web-01","name":"provenance","media_type
 // one document.
 func Workspace() map[string]string {
 	return map[string]string{
-		"custos.yaml":                      "workspace: " + WorkspaceID + "\ncatalog:\n  url: https://custos.example.org/git/catalog.git\n  commit: " + Commit + "\n",
+		"custos.yaml":                      Config(WorkspaceID, Commit),
 		"answers/" + TaskA + ".md":         AnswerFile,
 		"generated/" + TaskC + "/1.0.0.md": GeneratedFile,
 		"documents/" + DocID + ".json":     DocumentFile,
 	}
+}
+
+// Config returns a custos.yaml for workspace id, pinned to catalog commit.
+func Config(id, commit string) string {
+	return "workspace: " + id + "\ncatalog:\n  url: https://custos.example.org/git/catalog.git\n  commit: " + commit + "\n"
+}
+
+// PinnedWorkspace returns Workspace with its pin set to commit, usually a
+// commit of Catalog in a test repository.
+func PinnedWorkspace(commit string) map[string]string {
+	f := Workspace()
+	f["custos.yaml"] = Config(WorkspaceID, commit)
+	return f
 }
 
 // MapFS turns a file map into an fs.FS.
