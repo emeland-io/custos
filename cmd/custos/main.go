@@ -11,10 +11,10 @@ import (
 const usage = `custos manages a task catalog and the workspaces that answer its tasks.
 
 Usage:
-  custos serve [--data-dir DIR] [--addr ADDR]
+  custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
   custos validate [--against REV] [DIR]
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
-  custos workspace create [--data-dir DIR] WORKSPACE-UUID
+  custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID
 
 Run "custos COMMAND -h" for the flags of a command.
 `

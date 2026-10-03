@@ -1,99 +1,46 @@
-// Package server serves the catalog and workspace repositories over HTTP and
-// keeps their pre-receive hooks installed.
+// Package server serves the repositories of a store over HTTP.
 package server
 
 import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/cgi"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"sync"
 
-	"github.com/emeland-io/custos/internal/gitrepo"
-	"github.com/emeland-io/custos/internal/hook"
-	"github.com/emeland-io/custos/internal/task"
+	"github.com/emeland-io/custos/internal/store"
 )
 
-// Server owns the repositories below <data-dir>/repos:
-//
-//	catalog.git
-//	workspaces/<workspace-uuid>.git
+// catalogPushPath is the request that carries a push to the catalog.
+const catalogPushPath = "/git/catalog.git/git-receive-pack"
+
+// Server serves the repositories of a store. Repository layout, hooks and
+// writes belong to the store (ruling 2.17).
 type Server struct {
-	reposDir string
-	exe      string
+	st *store.Store
+
+	mu            sync.Mutex
+	onCatalogPush []func()
 }
 
-// New returns a server for the data directory without touching it. exe is
-// the custos binary the hooks of repositories it creates run.
-func New(dataDir, exe string) *Server {
-	return &Server{reposDir: filepath.Join(dataDir, "repos"), exe: exe}
+// New returns a server for st.
+func New(st *store.Store) *Server { return &Server{st: st} }
+
+// OnCatalogPush registers f to be called after each request to
+// /git/catalog.git/git-receive-pack completes, whether the push was accepted
+// or not. f runs before the response ends, so the pusher waits for it.
+func (s *Server) OnCatalogPush(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCatalogPush = append(s.onCatalogPush, f)
 }
 
-// Open prepares the data directory for serving: it creates the catalog
-// repository if needed and rewrites the hooks of all repositories to run
-// exe, so moving the binary between starts is safe.
-func Open(dataDir, exe string) (*Server, error) {
-	s := New(dataDir, exe)
-	wsDir := filepath.Join(s.reposDir, "workspaces")
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		return nil, err
-	}
-	if err := s.ensure(filepath.Join(s.reposDir, "catalog.git"), hook.Catalog); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(wsDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if e.IsDir() && strings.HasSuffix(e.Name(), ".git") {
-			if err := s.ensure(filepath.Join(wsDir, e.Name()), hook.Workspace); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return s, nil
-}
-
-// CreateWorkspace creates the empty repository of a new workspace. It
-// installs the hook of the new repository only and leaves the others alone.
-func (s *Server) CreateWorkspace(id string) error {
-	if !task.ValidID(id) {
-		return fmt.Errorf("workspace id %q is not a lowercase UUID v4", id)
-	}
-	wsDir := filepath.Join(s.reposDir, "workspaces")
-	if err := os.MkdirAll(wsDir, 0o755); err != nil {
-		return err
-	}
-	dir := filepath.Join(wsDir, id+".git")
-	if _, err := os.Stat(dir); err == nil {
-		return fmt.Errorf("workspace %s already exists", id)
-	}
-	return s.ensure(dir, hook.Workspace)
-}
-
-func (s *Server) ensure(dir string, kind hook.Kind) error {
-	repo := &gitrepo.Repo{Dir: dir}
-	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if repo, err = gitrepo.InitBare(dir); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	script, err := hook.Script(s.exe, kind)
-	if err != nil {
-		return err
-	}
-	return repo.InstallHook("pre-receive", script)
-}
-
-// Handler serves the repositories below /git through git http-backend.
+// Handler serves the repositories below /git through git http-backend, and
+// GET /healthz.
 func (s *Server) Handler() (http.Handler, error) {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -103,14 +50,29 @@ func (s *Server) Handler() (http.Handler, error) {
 		Path: gitPath,
 		Args: []string{"http-backend"},
 		Root: "/git",
-		Env:  []string{"GIT_PROJECT_ROOT=" + s.reposDir, "GIT_HTTP_EXPORT_ALL=1"},
+		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Join(s.st.DataDir(), "repos"), "GIT_HTTP_EXPORT_ALL=1"},
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/git/", withContentLength(backend))
+	mux.Handle("/git/", withContentLength(s.notifyCatalogPush(backend)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
 	return mux, nil
+}
+
+func (s *Server) notifyCatalogPush(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		if r.Method != http.MethodPost || r.URL.Path != catalogPushPath {
+			return
+		}
+		s.mu.Lock()
+		fs := append([]func(){}, s.onCatalogPush...)
+		s.mu.Unlock()
+		for _, f := range fs {
+			f()
+		}
+	})
 }
 
 // maxRequestBytes bounds every request body below /git/, chunked or not, so

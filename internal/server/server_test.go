@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/emeland-io/custos/internal/fixture"
+	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/gittest"
+	"github.com/emeland-io/custos/internal/store"
 )
 
 // custosBin is a custos binary built for these tests, because the
@@ -34,23 +36,30 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func start(t *testing.T) (*Server, string) {
+// start serves a new data directory the way custos serve does.
+func start(t *testing.T) (*store.Store, *Server, string) {
 	t.Helper()
-	srv, err := Open(t.TempDir(), custosBin)
+	st, err := store.Open(t.TempDir(), custosBin, "http://custos.test")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := st.InstallHooks(); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st)
 	h, err := srv.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	return srv, ts.URL
+	return st, srv, ts.URL
 }
 
+var jane = gitrepo.Signature{Name: "Jane Doe", Email: "jane@example.org"}
+
 func TestPushAndCloneCatalog(t *testing.T) {
-	_, url := start(t)
+	_, _, url := start(t)
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
 	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
@@ -63,7 +72,7 @@ func TestPushAndCloneCatalog(t *testing.T) {
 }
 
 func TestInvalidPushIsRejected(t *testing.T) {
-	_, url := start(t)
+	_, _, url := start(t)
 	work := gittest.Init(t)
 	f := fixture.Catalog()
 	f["groups/index.yaml"] = "groups: [missing]\n"
@@ -75,7 +84,7 @@ func TestInvalidPushIsRejected(t *testing.T) {
 }
 
 func TestPublishedVersionsAreImmutableButDraftsAreNot(t *testing.T) {
-	_, url := start(t)
+	_, _, url := start(t)
 	remote := url + "/git/catalog.git"
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
@@ -93,7 +102,7 @@ func TestPublishedVersionsAreImmutableButDraftsAreNot(t *testing.T) {
 }
 
 func TestForcePushToMainIsRejected(t *testing.T) {
-	_, url := start(t)
+	_, _, url := start(t)
 	remote := url + "/git/catalog.git"
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
@@ -107,7 +116,7 @@ func TestForcePushToMainIsRejected(t *testing.T) {
 }
 
 func TestLargePush(t *testing.T) {
-	_, url := start(t)
+	_, _, url := start(t)
 	work := gittest.Init(t)
 	f := fixture.Catalog()
 	big := make([]byte, 3<<20) // above git's 1 MiB http.postBuffer, so git sends it chunked
@@ -120,78 +129,46 @@ func TestLargePush(t *testing.T) {
 }
 
 func TestWorkspaces(t *testing.T) {
-	srv, url := start(t)
-	if err := srv.CreateWorkspace(fixture.WorkspaceID); err != nil {
+	st, _, url := start(t)
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
 		t.Fatal(err)
-	}
-	if err := srv.CreateWorkspace(fixture.WorkspaceID); err == nil {
-		t.Error("creating a workspace twice must fail")
-	}
-	if err := srv.CreateWorkspace("../escape"); err == nil {
-		t.Error("an invalid id must be rejected")
 	}
 	remote := url + "/git/workspaces/" + fixture.WorkspaceID + ".git"
+	clone := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", remote, clone)
+	if _, err := os.Stat(filepath.Join(clone, "custos.yaml")); err != nil {
+		t.Fatal(err)
+	}
 
-	bad := gittest.Init(t)
-	gittest.Commit(t, bad, map[string]string{"answers/notes.txt": "x"})
-	if out, err := gittest.Try(bad, "push", remote, "main"); err == nil || !strings.Contains(out, "custos.yaml is missing") {
+	gittest.Commit(t, clone, map[string]string{"answers/notes.txt": "x"})
+	if out, err := gittest.Try(clone, "push", "origin", "main"); err == nil || !strings.Contains(out, "answers/notes.txt: path: unexpected file") {
 		t.Fatalf("err %v, output:\n%s", err, out)
 	}
-
-	good := gittest.Init(t)
-	gittest.Commit(t, good, fixture.Workspace())
-	gittest.Run(t, good, "push", remote, "main")
+	gittest.Run(t, clone, "reset", "--quiet", "--hard", "HEAD~1")
+	gittest.Commit(t, clone, map[string]string{"answers/" + fixture.TaskA + ".md": fixture.AnswerFile})
+	gittest.Run(t, clone, "push", "origin", "main")
 }
 
-func TestOpenReinstallsHooks(t *testing.T) {
-	data := t.TempDir()
-	if _, err := Open(data, "/first/custos"); err != nil {
-		t.Fatal(err)
+func TestOnCatalogPush(t *testing.T) {
+	_, srv, url := start(t)
+	calls := 0
+	srv.OnCatalogPush(func() { calls++ })
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
+	if calls != 1 {
+		t.Fatalf("%d calls after one push", calls)
 	}
-	srv, err := Open(data, "/second/custos")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := srv.CreateWorkspace(fixture.WorkspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(data, "/third/custos"); err != nil {
-		t.Fatal(err)
-	}
-	for _, repo := range []string{"catalog.git", "workspaces/" + fixture.WorkspaceID + ".git"} {
-		script, err := os.ReadFile(filepath.Join(data, "repos", repo, "hooks", "pre-receive"))
-		if err != nil || !strings.Contains(string(script), "'/third/custos' hook pre-receive") {
-			t.Errorf("%s hook: %q %v", repo, script, err)
-		}
-	}
-}
-
-func TestCreateWorkspaceLeavesOtherHooks(t *testing.T) {
-	data := t.TempDir()
-	if _, err := Open(data, "/first/custos"); err != nil {
-		t.Fatal(err)
-	}
-	if err := New(data, "/second/custos").CreateWorkspace(fixture.WorkspaceID); err != nil {
-		t.Fatal(err)
-	}
-	for repo, want := range map[string]string{
-		"catalog.git": "/first/custos",
-		"workspaces/" + fixture.WorkspaceID + ".git": "/second/custos",
-	} {
-		script, err := os.ReadFile(filepath.Join(data, "repos", repo, "hooks", "pre-receive"))
-		if err != nil || !strings.Contains(string(script), "'"+want+"' hook pre-receive") {
-			t.Errorf("%s hook: %q %v, want %s", repo, script, err, want)
-		}
-	}
-}
-
-func TestCreateWorkspaceInEmptyDataDir(t *testing.T) {
-	data := t.TempDir()
-	if err := New(data, "/custos").CreateWorkspace(fixture.WorkspaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(data, "repos", "workspaces", fixture.WorkspaceID+".git", "hooks", "pre-receive")); err != nil {
-		t.Error(err)
+	gittest.Run(t, t.TempDir(), "ls-remote", url+"/git/catalog.git")
+	f := fixture.Catalog()
+	f["groups/index.yaml"] = "groups: [missing]\n"
+	gittest.Commit(t, work, f)
+	gittest.Try(work, "push", url+"/git/catalog.git", "main")
+	if calls != 2 {
+		t.Errorf("%d calls; want 2: a fetch does not count, a rejected push does", calls)
 	}
 }
 
@@ -263,11 +240,7 @@ func TestWithContentLengthLimitsBody(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	srv, err := Open(t.TempDir(), custosBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := srv.Handler()
+	h, err := New(store.New(t.TempDir(), custosBin, "http://custos.test")).Handler()
 	if err != nil {
 		t.Fatal(err)
 	}

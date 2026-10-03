@@ -8,22 +8,29 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/emeland-io/custos/internal/server"
+	"github.com/emeland-io/custos/internal/store"
 )
 
-// defaultAddr listens on loopback only: phase 1 has no authentication.
+// defaultAddr listens on loopback only: there is no authentication yet.
 const defaultAddr = "127.0.0.1:8080"
+
+// defaultPublicURL is where clients reach a server on defaultAddr.
+const defaultPublicURL = "http://127.0.0.1:8080"
 
 func runServe(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	dataDir := fl.String("data-dir", os.Getenv("CUSTOS_DATA_DIR"), "directory holding the repositories (env CUSTOS_DATA_DIR)")
 	addr := fl.String("addr", envOr("CUSTOS_ADDR", defaultAddr), "listen address (env CUSTOS_ADDR); there is no authentication yet, so keep it on loopback unless the network is trusted")
+	publicURL := publicURLFlag(fl)
 	if err := fl.Parse(args); err != nil {
 		return helpOrUsage(err)
 	}
@@ -31,7 +38,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "custos serve: --data-dir or CUSTOS_DATA_DIR is required")
 		return 2
 	}
-	srv, err := openServer(*dataDir)
+	if err := checkPublicURL(*publicURL); err != nil {
+		fmt.Fprintf(stderr, "custos serve: %v\n", err)
+		return 2
+	}
+	srv, err := openServer(*dataDir, *publicURL, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
@@ -71,13 +82,49 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// openServer opens the data directory with hooks that run this binary.
-func openServer(dataDir string) (*server.Server, error) {
+// openServer opens the data directory, points all hooks at this binary and
+// reports workspaces whose main breaks the rules, for example after an edit
+// on disk (spec section 7); it serves them anyway.
+func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	return server.Open(dataDir, exe)
+	st, err := store.Open(dataDir, exe, publicURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := st.InstallHooks(); err != nil {
+		return nil, err
+	}
+	ids, err := st.WorkspaceIDs()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		ps, err := st.CheckWorkspace(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "custos serve: workspace %s: %v\n", id, err)
+		}
+		for _, p := range ps {
+			fmt.Fprintf(stderr, "custos serve: workspace %s is inconsistent: %s\n", id, p)
+		}
+	}
+	return server.New(st), nil
+}
+
+// publicURLFlag defines --public-url.
+func publicURLFlag(fl *flag.FlagSet) *string {
+	return fl.String("public-url", envOr("CUSTOS_PUBLIC_URL", defaultPublicURL), "base URL clients reach the server at, written into new workspaces (env CUSTOS_PUBLIC_URL)")
+}
+
+// checkPublicURL accepts absolute http and https URLs without query.
+func checkPublicURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || strings.Contains(s, "'") {
+		return fmt.Errorf("--public-url %q is not an absolute http or https URL such as %s", s, defaultPublicURL)
+	}
+	return nil
 }
 
 func envOr(name, fallback string) string {

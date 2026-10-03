@@ -11,8 +11,10 @@ every change to their `main` branch and serves them over HTTP.
 
 The design is in
 [docs/superpowers/specs/2026-10-02-custos-design.md](docs/superpowers/specs/2026-10-02-custos-design.md).
-This version implements its first phase: file formats, validation, Git over
-HTTP and the command line. Distributing catalog updates to workspaces,
+This version implements the first phase (file formats, validation, Git over
+HTTP and the command line) and the start of the second: workspaces are
+created pinned to the catalog, and pushes to a workspace are checked against
+that catalog. Distributing catalog updates to workspaces, the REST API,
 processors and the web UI follow.
 
 ## Catalog
@@ -119,11 +121,15 @@ Markdown answers keep their text in the body and have no `value`.
 ```sh
 custos validate [--against REV] [DIR]                    # check a catalog or workspace checkout
 custos task new-version --minor TASK-UUID                # write the next version (or --patch, --major)
-custos workspace create [--data-dir DIR] WORKSPACE-UUID  # create an empty workspace repository
-custos serve [--data-dir DIR] [--addr ADDR]              # serve the repositories over HTTP
+custos workspace create --author "Jane Doe <jane@example.org>" WORKSPACE-UUID
+                                                         # create a workspace pinned to the catalog
+custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
+                                                         # serve the repositories over HTTP
 ```
 
 `workspace create` and `serve` need `--data-dir` or `CUSTOS_DATA_DIR`.
+`workspace create` also needs `--author` or `CUSTOS_AUTHOR`, the author of
+the workspace's first commit.
 
 In the root of a git checkout, `custos validate` checks the staged content
 (the git index), which is what the next commit will hold: untracked and
@@ -136,7 +142,7 @@ repository root.
 
 ## Running
 
-Requires Go 1.26 and git 2.28 or later.
+Requires Go 1.26 and git 2.38 or later.
 
 ```sh
 make build
@@ -149,17 +155,31 @@ Repositories are served at `/git/catalog.git` and
 runs. **There is no authentication yet**, so custos listens on
 `127.0.0.1:8080` by default.
 
-A workspace repository must be created before its first push:
+Push the catalog first; a workspace can only be created once the catalog
+has a `main` branch. Creating a workspace makes its first commit, a
+`custos.yaml` pinned to the catalog's current `main`, so clone it and push
+your answers on top:
 
 ```sh
-./custos workspace create --data-dir ./data 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
-git push http://127.0.0.1:8080/git/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9.git main
+./custos workspace create --data-dir ./data --author "Jane Doe <jane@example.org>" \
+    5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+git clone http://127.0.0.1:8080/git/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9.git
 ```
 
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `--data-dir` | `CUSTOS_DATA_DIR` | required |
 | `--addr` | `CUSTOS_ADDR` | `127.0.0.1:8080` |
+| `--public-url` | `CUSTOS_PUBLIC_URL` | `http://127.0.0.1:8080` |
+| `--author` (`workspace create`) | `CUSTOS_AUTHOR` | required |
+
+`--public-url` is the address clients reach the server at. custos writes it
+into the `catalog.url` of new workspaces, so set it whenever the server is
+reached under another address than the default, for example behind a proxy
+or with another `--addr`.
+
+At start, `serve` reports workspaces whose `main` breaks the rules, for
+example after an edit on disk, and serves them anyway.
 
 Flags win over environment variables. Run the built binary rather than
 `go run`: the repositories' hooks call the binary that started the server.
@@ -168,8 +188,11 @@ Flags win over environment variables. Run the built binary rather than
 
 ```sh
 make docker
-docker run -d --name custos -p 127.0.0.1:9090:8080 -v custos-data:/data custos:dev
-docker exec custos custos workspace create 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+docker run -d --name custos -p 127.0.0.1:9090:8080 -v custos-data:/data \
+    -e CUSTOS_PUBLIC_URL=http://127.0.0.1:9090 custos:dev
+git push http://127.0.0.1:9090/git/catalog.git main
+docker exec custos custos workspace create --author "Jane Doe <jane@example.org>" \
+    5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
 ```
 
 The image runs as UID 65532, keeps its repositories in the volume `/data`
