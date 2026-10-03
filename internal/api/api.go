@@ -38,4 +38,6 @@ func (a *API) Handler() http.Handler { return a.mux }
 func (a *API) routes() {
 	a.Handle("POST /api/blobs", a.postBlob)
 	a.Handle("GET /api/blobs/{sha256}", a.getBlob) // GET patterns also match HEAD
+	a.Handle("GET /api/workspaces", a.listWorkspaces)
+	a.Handle("POST /api/workspaces", a.createWorkspace)
 }
