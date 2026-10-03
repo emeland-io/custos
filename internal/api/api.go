@@ -40,4 +40,6 @@ func (a *API) routes() {
 	a.Handle("GET /api/blobs/{sha256}", a.getBlob) // GET patterns also match HEAD
 	a.Handle("GET /api/workspaces", a.listWorkspaces)
 	a.Handle("POST /api/workspaces", a.createWorkspace)
+	a.Handle("GET /api/catalog", a.getCatalog)
+	a.Handle("GET /api/catalog/tasks/{id}", a.getCatalogTask)
 }
