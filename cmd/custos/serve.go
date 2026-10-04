@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
 	"github.com/emeland-io/custos/internal/store"
 )
@@ -114,6 +115,7 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 	if err != nil {
 		return nil, err
 	}
+	merge.Register(a, st)
 	srv := server.New(st)
 	startDistribution(st, a, srv, stderr)
 	srv.WithAPI(a.Handler())
