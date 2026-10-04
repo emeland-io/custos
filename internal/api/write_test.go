@@ -155,6 +155,12 @@ func TestPutAnswerRoundTrip(t *testing.T) {
 	if got := decode[answerJSON](t, e.do(t, "GET", path+fixture.TaskA, "", ""), http.StatusOK); got.Value != value {
 		t.Errorf("value %q, want %q", got.Value, value)
 	}
+
+	tabValue := "\tx\ny"
+	decode[answerResponse](t, put(t, e, fixture.TaskA, janeHeader, jsonBody(t, map[string]string{"value": tabValue})), http.StatusOK)
+	if got := decode[answerJSON](t, e.do(t, "GET", path+fixture.TaskA, "", ""), http.StatusOK); got.Value != tabValue {
+		t.Errorf("value %q, want %q", got.Value, tabValue)
+	}
 }
 
 func TestPutAnswerWithAttachment(t *testing.T) {
@@ -191,5 +197,16 @@ func TestPutAnswerToMergedTask(t *testing.T) {
 	got := decode[answerResponse](t, put(t, e, fixture.TaskA, janeHeader, `{"value":"x"}`), http.StatusOK)
 	if got.TaskVersion != "2.0.0" {
 		t.Errorf("task_version %q", got.TaskVersion)
+	}
+}
+
+func TestPutAnswerTabValueIsIdempotent(t *testing.T) {
+	e := newEnv(t, testCatalog())
+	e.createWorkspace(t)
+	body := jsonBody(t, map[string]string{"value": "\tx\ny"})
+	first := decode[answerResponse](t, put(t, e, fixture.TaskA, janeHeader, body), http.StatusOK)
+	again := decode[answerResponse](t, put(t, e, fixture.TaskA, janeHeader, body), http.StatusOK)
+	if again.Commit != first.Commit {
+		t.Errorf("saving the same tab-leading answer again made commit %s after %s", again.Commit, first.Commit)
 	}
 }
