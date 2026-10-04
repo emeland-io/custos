@@ -190,6 +190,23 @@ func TestPutAnswerToGeneratedTask(t *testing.T) {
 	}
 }
 
+// TestPutAnswerWorkspaceWithoutMain covers a workspace repository that
+// exists (so workspaceID(r) resolves it) but has no main yet — for example
+// a fork in progress, created with CreateWorkspaceRepo before the first
+// commit lands. answerChange must not call catalogAt("") and 500; it
+// should refuse with a clear 409 instead.
+func TestPutAnswerWorkspaceWithoutMain(t *testing.T) {
+	e := newEnv(t, testCatalog())
+	if _, err := e.st.CreateWorkspaceRepo(fixture.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	rec := put(t, e, fixture.TaskA, janeHeader, `{"value":"x"}`)
+	got := decode[errorJSON](t, rec, http.StatusConflict)
+	if !strings.Contains(got.Error, "no main") {
+		t.Errorf("error %q, want it to mention the workspace has no main yet", got.Error)
+	}
+}
+
 func TestPutAnswerToMergedTask(t *testing.T) {
 	e := newEnv(t, mergedCatalog())
 	e.createWorkspace(t)

@@ -69,6 +69,20 @@ func TestStillValidErrors(t *testing.T) {
 	}
 }
 
+// TestStillValidWorkspaceWithoutMain mirrors
+// TestPutAnswerWorkspaceWithoutMain: a workspace repo that exists but has
+// no main yet must refuse with 409, not 500.
+func TestStillValidWorkspaceWithoutMain(t *testing.T) {
+	e := newEnv(t, testCatalog())
+	if _, err := e.st.CreateWorkspaceRepo(fixture.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	got := decode[errorJSON](t, stillValid(t, e, fixture.WorkspaceID, fixture.TaskA, janeHeader), http.StatusConflict)
+	if !strings.Contains(got.Error, "no main") {
+		t.Errorf("error %q, want it to mention the workspace has no main yet", got.Error)
+	}
+}
+
 func TestStillValidMergedTask(t *testing.T) {
 	e := newEnv(t, mergedCatalog())
 	e.createWorkspace(t)

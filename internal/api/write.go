@@ -108,6 +108,9 @@ func (a *API) updateAnswer(id, tid string, author gitrepo.Signature, message str
 
 func (a *API) answerChange(id, tid string, tree fs.FS, edit answerEdit) (*workspace.Answer, []gitrepo.Change, error) {
 	ws, _ := workspace.Load(tree) // main is valid; the store re-validates the result
+	if ws.Config.Catalog.Commit == "" {
+		return nil, nil, errorf(http.StatusConflict, "workspace %s has no main yet", id)
+	}
 	c, err := a.catalogAt(ws.Config.Catalog.Commit)
 	if err != nil {
 		return nil, nil, err
