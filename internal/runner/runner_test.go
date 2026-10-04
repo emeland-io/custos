@@ -90,6 +90,34 @@ func TestRunCancelled(t *testing.T) {
 	}
 }
 
+// TestRunCancelledBeforeResolve cancels ctx before Run even calls Resolve, so
+// the container is never created. The resulting error must still wrap
+// ctx.Err(), not ErrUnavailable, even though the docker calls inside Resolve
+// fail because ctx is done.
+func TestRunCancelledBeforeResolve(t *testing.T) {
+	img := proctest.Image(t, "echo") // a pinned local image: resolves without a pull
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := New(Config{}).Run(ctx, Job{Image: img})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnavailable) {
+		t.Errorf("err %v, want context.Canceled, not ErrUnavailable", err)
+	}
+}
+
+// TestRunCancelledBeforePull cancels ctx before Run calls ensureImage for an
+// image that is not present locally, so Run would otherwise attempt a
+// docker pull. That pull fails because ctx is already done; the resulting
+// error must still wrap ctx.Err(), not ErrUnavailable.
+func TestRunCancelledBeforePull(t *testing.T) {
+	remote := "registry.example.org/host-scanner@sha256:" + strings.Repeat("1", 64)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := New(Config{}).Run(ctx, Job{Image: remote})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnavailable) {
+		t.Errorf("err %v, want context.Canceled, not ErrUnavailable", err)
+	}
+}
+
 // TestRunSandbox inspects a running container: the flags of §5.2 and the
 // read-only mounts of secrets and attachments.
 func TestRunSandbox(t *testing.T) {

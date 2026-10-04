@@ -100,9 +100,15 @@ func (r *Runner) Run(ctx context.Context, job Job) (*Result, error) {
 	}
 	ref, _, err := r.Resolve(ctx, job.Image)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("processor run cancelled: %w", ctx.Err())
+		}
 		return nil, err
 	}
 	if err := r.ensureImage(ctx, ref); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("processor run cancelled: %w", ctx.Err())
+		}
 		return nil, err
 	}
 	name := "custos-run-" + uuid.NewString()
