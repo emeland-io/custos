@@ -11,7 +11,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | --- | --- | --- |
 | 1 Core | Catalog and workspace formats, validation, Git over HTTP with a validating pre-receive hook, CLI `validate`, `task new-version`, `workspace create`, `serve`, container image | Done, merged to `main` on 2026-10-03 (`d0af8ad`) |
 | 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Done, merged to `main` on 2026-10-04 (`43ad0c9`) |
-| 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Not planned |
+| 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | 5 plans written, not started |
 | 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Not planned |
 
 ## Phase 1 — Core
@@ -56,7 +56,32 @@ Rulings: spec §11.2 holds 41 rulings made while planning (2.1–2.41) and 15 ma
 
 ## Phase 3 — Processors
 
-Not planned yet.
+The plans run in order, and each needs the ones before it.
+
+| Plan | Content | Tasks | Status |
+| --- | --- | --- | --- |
+| [3a](2026-10-04-phase-3a-runner.md) | Processor contract (input and output JSON), container runner through the Docker or Podman CLI, and the test images echo, generate, sign, fail and loop | 5 | Not started |
+| [3b](2026-10-04-phase-3b-attest.md) | Verifying documents: DSSE envelopes, Sigstore bundles and bare statements, with the carabiner-dev libraries (ADR 0001) | 4 | Not started |
+| [3c](2026-10-04-phase-3c-proposals.md) | Matching output against earlier output, the depth limit, proposal branches, accepting all or some items, rejecting, cascading removal | 5 | Not started |
+| [3d](2026-10-04-phase-3d-runs.md) | Run records, queue and workers, finding the runs needed after answers, pushes, pin moves and merges; REST endpoints, `serve` flags, merge reruns (replacing ruling 2.10), dry runs | 8 | Not started |
+| [3e](2026-10-04-phase-3e-sdk.md) | Go and Python SDKs, `custos processor test` with golden files, Makefile and README | 6 | Not started |
+
+How the plans were made: the controller wrote a shared architecture note, [2026-10-04-phase-3-architecture.md](2026-10-04-phase-3-architecture.md), and five subagents wrote the plans from it in parallel. A sixth reviewed them as a set and applied all five in order to a scratch copy of the repository; with real Docker, `gofmt`, `go vet`, `go test` after each plan, `go test -race` on the concurrent packages and `make test` with the SDK tests all passed. It fixed plan text where the plans did not fit together: the accept endpoint now reports a commit that landed together with a warning, a test runs the real `sign` image against the verifier, and the plans no longer edit the spec themselves.
+
+Choices the project owner made for this phase: plans written like phase 2, run records as files in the data directory, and tests always against real Docker.
+
+Rulings: spec §11.3 holds 80 rulings made while planning (3.1–3.80); 3.1–3.11 come from the architecture note. These change the spec or the way custos is run and deserve a look first:
+
+| Ruling | What changes |
+| --- | --- |
+| 3.2 | Run records are files under `<data-dir>/runs/`, not Git and not an index. |
+| 3.3 | Runs are found by a key (workspace, answer path, answer blob, processor digest), so a rebinding to an image that already ran on an answer does not rerun. |
+| 3.4 | Processors run through the `docker`/`podman` CLI; the test suite needs Docker. |
+| 3.7 | Replaces 2.10: merge conflicts in generated output take `main`'s side and trigger a rerun. |
+| 3.8 | Removing a generated task removes its answer from `main`; cascades are separate proposals. |
+| 3.80 | `make test` needs Docker and python3. |
+
+Also note: the container image gets no Docker client in phase 3, so processors run only when `custos serve` runs on a host with Docker or Podman (ruling 3.79). A document signed with a key custos does not trust shows as `failed` on the server, but as `unsigned` in `custos processor test` without `--trusted-keys`.
 
 ## Phase 4 — UI and authentication
 
