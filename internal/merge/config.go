@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"slices"
 
-	"go.yaml.in/yaml/v3"
-
 	"github.com/emeland-io/custos/internal/frontmatter"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/store"
@@ -28,20 +26,6 @@ func decodeConfig(data []byte) (workspace.Config, error) {
 		return workspace.Config{}, fmt.Errorf("custos.yaml: %w", err)
 	}
 	return c, nil
-}
-
-// encodeConfig writes custos.yaml with two-space indentation.
-func encodeConfig(c workspace.Config) ([]byte, error) {
-	var b bytes.Buffer
-	enc := yaml.NewEncoder(&b)
-	enc.SetIndent(2)
-	if err := enc.Encode(c); err != nil {
-		return nil, err
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
 }
 
 type configOutcome int
@@ -116,7 +100,7 @@ func (p *plan) settleConfig(mainData, ours, theirs []byte, res map[string]Resolu
 		return nil
 	}
 	cfg.Workspace = main.Workspace
-	out, err := encodeConfig(cfg)
+	out, err := workspace.MarshalConfig(cfg)
 	if err != nil {
 		return err
 	}
@@ -148,7 +132,7 @@ func mergeConfig(cat *gitrepo.Repo, base, ours, theirs []byte) ([]byte, configOu
 		return nil, configPinConflict, nil
 	}
 	m.Catalog.Commit = pin
-	data, err := encodeConfig(m)
+	data, err := workspace.MarshalConfig(m)
 	if err != nil {
 		return nil, 0, err
 	}

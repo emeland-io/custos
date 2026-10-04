@@ -10,6 +10,7 @@ import (
 	"github.com/emeland-io/custos/internal/rules"
 	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/task"
+	"github.com/emeland-io/custos/internal/workspace"
 )
 
 // forkRef holds the source's main in the new repository until the fork
@@ -93,7 +94,7 @@ func forkInto(st *store.Store, src, dst *gitrepo.Repo, srcID, newID string, auth
 		return fmt.Errorf("workspace %s: %w", srcID, err)
 	}
 	cfg.Workspace = newID
-	out, err := encodeConfig(cfg)
+	out, err := workspace.MarshalConfig(cfg)
 	if err != nil {
 		return err
 	}

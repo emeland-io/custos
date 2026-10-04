@@ -5,12 +5,9 @@
 package distribute
 
 import (
-	"bytes"
 	"fmt"
 	"io/fs"
 	"reflect"
-
-	"go.yaml.in/yaml/v3"
 
 	"github.com/emeland-io/custos/internal/frontmatter"
 	"github.com/emeland-io/custos/internal/gitrepo"
@@ -40,21 +37,6 @@ func decodeConfig(data []byte) (workspace.Config, error) {
 	return c, nil
 }
 
-// encodeConfig writes custos.yaml with the two-space indentation the
-// examples in the README use.
-func encodeConfig(c workspace.Config) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(c); err != nil {
-		return nil, err
-	}
-	if err := enc.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 // setConfig applies change to the custos.yaml in data. changed is false, and
 // out nil, when change left every field as it was.
 func setConfig(data []byte, change func(*workspace.Config)) (out []byte, changed bool, err error) {
@@ -67,7 +49,7 @@ func setConfig(data []byte, change func(*workspace.Config)) (out []byte, changed
 	if reflect.DeepEqual(c, before) {
 		return nil, false, nil
 	}
-	if out, err = encodeConfig(c); err != nil {
+	if out, err = workspace.MarshalConfig(c); err != nil {
 		return nil, false, err
 	}
 	return out, true, nil
