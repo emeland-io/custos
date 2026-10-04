@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 
 	"go.yaml.in/yaml/v3"
 
@@ -74,13 +75,52 @@ func (p *plan) config(st *store.Store, repo *gitrepo.Repo, base, ours, theirs st
 		p.changes = append(p.changes, gitrepo.Change{Path: configPath, Data: merged})
 		return nil
 	case configPinConflict:
-		return p.settle(configPath, files[1], files[2], res)
+		return p.settleConfig(files[1], files[1], files[2], res)
 	}
 	for _, c := range mt.Conflicts {
 		if c.Path == configPath {
-			return p.settle(c.Path, c.Ours, c.Theirs, res)
+			return p.settleConfig(files[1], c.Ours, c.Theirs, res)
 		}
 	}
+	return nil
+}
+
+// settleConfig is settle for custos.yaml: a resolution that takes a side
+// whole (ours or theirs) keeps main's workspace id, because the branch may
+// be a fork's and carry another id (spec README: main keeps its id across
+// a merge). A resolution given as explicit content is used as given. When
+// main's own file (mainData) does not decode, or the chosen side's
+// resulting content does not decode, the id is left as is; validation
+// reports it.
+func (p *plan) settleConfig(mainData, ours, theirs []byte, res map[string]Resolution) error {
+	if err := p.settle(configPath, ours, theirs, res); err != nil {
+		return err
+	}
+	r, ok := res[configPath]
+	if !ok || r.Side == SideContent {
+		return nil
+	}
+	i := slices.IndexFunc(p.changes, func(c gitrepo.Change) bool { return c.Path == configPath })
+	if i < 0 || p.changes[i].Delete {
+		return nil
+	}
+	main, err := decodeConfig(mainData)
+	if err != nil {
+		return nil
+	}
+	cfg, err := decodeConfig(p.changes[i].Data)
+	if err != nil {
+		return nil
+	}
+	if cfg.Workspace == main.Workspace {
+		return nil
+	}
+	cfg.Workspace = main.Workspace
+	out, err := encodeConfig(cfg)
+	if err != nil {
+		return err
+	}
+	p.changes[i].Data = out
 	return nil
 }
 
