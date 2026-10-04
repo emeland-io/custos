@@ -105,7 +105,12 @@ func Main(name string, wrap func(statement []byte) (json.RawMessage, error)) {
 		at := fmt.Sprintf("line %d: %s", n+1, f[0])
 		need := func(min int) {
 			if len(f) < min {
-				fail("%s needs at least %d arguments", at, min-1)
+				n := min - 1
+				noun := "arguments"
+				if n == 1 {
+					noun = "argument"
+				}
+				fail("%s needs at least %d %s", at, n, noun)
 			}
 		}
 		lookup := func() *outTask {

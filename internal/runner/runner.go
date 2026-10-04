@@ -180,6 +180,13 @@ func (r *Runner) Run(ctx context.Context, job Job) (*Result, error) {
 	if state.Error != "" {
 		return nil, fmt.Errorf("%w: %s", ErrUnavailable, state.Error)
 	}
+	if state.Running {
+		// cmd.Wait returned (done closed) but the container itself is still
+		// running: the client process died or lost its daemon connection
+		// without the container actually exiting. Reporting state.ExitCode
+		// here (typically 0) would misreport this as a successful empty run.
+		return nil, fmt.Errorf("%w: client exited but the container is still running", ErrUnavailable)
+	}
 	res.ExitCode = state.ExitCode
 	if state.OOMKilled {
 		res.Log = append(res.Log, []byte("\n[killed: out of memory, limit "+r.cfg.Memory+"]\n")...)
@@ -239,6 +246,7 @@ type containerState struct {
 	ExitCode  int    `json:"ExitCode"`
 	Error     string `json:"Error"`
 	OOMKilled bool   `json:"OOMKilled"`
+	Running   bool   `json:"Running"`
 }
 
 func (r *Runner) state(name string) (containerState, error) {

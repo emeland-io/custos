@@ -287,9 +287,17 @@ func TestResolve(t *testing.T) {
 	if err != nil || ref != id || digest != id {
 		t.Errorf("pinned local image: ref %q, digest %q, err %v; want %q twice", ref, digest, err, id)
 	}
+	// Confirm independently (not via the cached id from proctest.Image) that
+	// the tag currently points at the id Resolve is expected to return, so
+	// this assertion does not just trust proctest's cache.
+	freshID, err := exec.Command("docker", "image", "inspect", "--format", "{{.Id}}", "custos.test/echo:latest").Output()
+	if err != nil {
+		t.Fatalf("docker image inspect custos.test/echo:latest: %v", err)
+	}
+	wantDigest := strings.TrimSpace(string(freshID))
 	ref, digest, err = r.Resolve(ctx, "custos.test/echo:latest")
-	if err != nil || ref != "custos.test/echo:latest" || digest != id {
-		t.Errorf("local tag: ref %q, digest %q, err %v", ref, digest, err)
+	if err != nil || ref != "custos.test/echo:latest" || digest != wantDigest {
+		t.Errorf("local tag: ref %q, digest %q, err %v; want digest %q (fresh docker image inspect)", ref, digest, err, wantDigest)
 	}
 	remote := "registry.example.org/host-scanner@sha256:" + strings.Repeat("1", 64)
 	ref, digest, err = r.Resolve(ctx, remote)

@@ -79,7 +79,7 @@ func build(name string) (string, error) {
 	}
 	defer os.RemoveAll(dir)
 
-	gobuild := exec.Command("go", "build", "-trimpath", "-o", filepath.Join(dir, "processor"), ".")
+	gobuild := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", filepath.Join(dir, "processor"), ".")
 	gobuild.Dir = src
 	gobuild.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
 	if out, err := gobuild.CombinedOutput(); err != nil {
