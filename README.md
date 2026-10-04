@@ -18,7 +18,8 @@ that catalog. Answers can be written through a REST API, attachments are
 kept in a blob store on the server, and `custos clone` / `custos push` move
 them along with the Git history. Catalog updates reach the workspaces on
 their own, as a new pin or, for frozen workspaces, as a pin proposal.
-Forking and merging workspaces, processors and the web UI follow.
+Workspaces can be forked, and branches merged into `main`. Processors and
+the web UI follow.
 
 ## Catalog
 
@@ -338,6 +339,76 @@ does not have yet, then runs `git push`. It pushes nothing when an attachment
 is neither in `.custos/blobs/sha256/` nor on the server. Uploads are made in
 the name of `--author`, `CUSTOS_AUTHOR`, or else the checkout's
 `user.name` and `user.email`.
+
+## Fork and merge
+
+**Fork** a workspace to start a new one from its history, for example for
+the next release of a product. The fork's `main` is the source's `main`
+plus one commit that sets the new id in `custos.yaml`. Branches are not
+copied. Attachments live in one blob store shared by all workspaces, so
+nothing is copied there.
+
+```sh
+curl -X POST -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+  -d '{"id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"}' \
+  http://127.0.0.1:8080/api/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9/fork
+```
+
+Leave out `id` to get a generated one; the answer is `201 {"id": "…"}`.
+
+**Branches** of a workspace are for parallel or what-if work. Push any
+branch other than `main` with Git; only `main` is validated.
+`GET /api/workspaces/<id>/branches` lists them as `[{"name", "commit"}]`.
+To bring a fork's work back, push its `main` to a branch of the original
+workspace:
+
+```sh
+git push http://127.0.0.1:8080/git/workspaces/<original-id>.git main:from-fork
+```
+
+**Merge** a branch into `main`:
+
+```sh
+curl -X POST -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+  -d '{"branch": "what-if"}' \
+  http://127.0.0.1:8080/api/workspaces/<id>/merge
+```
+
+custos always records a merge commit, authored by you, and validates the
+result like a push to `main` before `main` moves (`200 {"commit": "…"}`).
+When a file changed on both sides, nothing changes and the answer is `409`
+with the conflicts. `ours` is the file on `main`, `theirs` the file on the
+branch, both base64-encoded, `null` when that side deleted the file:
+
+```json
+{"error": "…", "conflicts": [{"path": "answers/<task-uuid>.md", "kind": "answer", "ours": "LS0t…", "theirs": "LS0t…"}]}
+```
+
+Send the merge again with a resolution for every conflicting path: `ours`
+keeps `main`'s version, `theirs` takes the branch's, `content` writes the
+given base64 content.
+
+```json
+{"branch": "what-if", "resolutions": {"answers/<task-uuid>.md": {"side": "theirs"}}}
+```
+
+- `custos.yaml` is merged field by field. `main` keeps its workspace id, so
+  a fork's work merges back. When both sides moved the pin, it moves to the
+  newer catalog commit; when neither commit descends from the other,
+  `custos.yaml` is a conflict like any other file.
+- Generated tasks and documents in conflict are resolved by choosing a side,
+  like answers, until processors can be rerun (phase 3).
+- `400` means a bad branch name or resolution (including one for a path
+  without a conflict), `404` an unknown workspace or branch, `422` a merge
+  result that breaks a rule. `409` without conflicts means `main` moved
+  while the merge ran, or the branch shares no history with `main`; send
+  the merge again after checking.
+- A successful merge or fork through the API is followed at once by
+  reconciling the new or changed workspace with the catalog, the same way
+  a push is: the pin moves, or a pin proposal opens, without waiting for
+  the next catalog update.
+
+Merging needs git 2.38 or later (see [Running](#running)).
 
 ## Container image
 
