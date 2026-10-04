@@ -151,6 +151,32 @@ func TestAcceptIsValidated(t *testing.T) {
 	}
 }
 
+// TestAcceptMergeMissingConfigOnMain checks that the error from a merge
+// whose main has no custos.yaml (edited away behind the store's back) names
+// the proposal branch, not just the bare file name.
+func TestAcceptMergeMissingConfigOnMain(t *testing.T) {
+	st, repo, _, c2 := frozenWithProposal(t)
+	answerA(t, st, wsA) // main moves past the proposal's base, forcing a merge
+	main := resolve(t, repo, "refs/heads/main")
+	broken, err := repo.WriteCommit(gitrepo.CommitRequest{
+		Base: main, Parents: []string{main}, Author: gitrepo.Bot, Message: "Delete custos.yaml",
+		Changes: []gitrepo.Change{{Path: "custos.yaml", Delete: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateRef("refs/heads/main", broken, main); err != nil {
+		t.Fatal(err)
+	}
+	branch := "custos/pin/" + c2
+
+	err = Accept(st, wsA, branch, person)
+	want := "accept pin proposal " + branch + ": custos.yaml is missing on main"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err %v, want %q", err, want)
+	}
+}
+
 func TestAcceptUnknownBranch(t *testing.T) {
 	st, _, _, _ := frozenWithProposal(t)
 	for _, branch := range []string{"custos/pin/" + strings.Repeat("a", 40), "draft", "custos/pin/../main"} {

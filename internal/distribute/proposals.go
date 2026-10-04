@@ -14,8 +14,9 @@ import (
 
 // rejectedRefPrefix + catalog commit marks the proposal for that commit as
 // rejected, so that reconcile does not open it again. It points at the last
-// commit of the rejected branch. It is not a branch, so clones do not fetch
-// it. Reconcile deletes it once the catalog's main moves on.
+// commit of the rejected branch. It is not a branch, so an ordinary clone
+// does not fetch it, though `git clone --mirror` does. Reconcile deletes it
+// once the catalog's main moves on.
 const rejectedRefPrefix = "refs/custos/rejected-pin/"
 
 var commitRE = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -136,7 +137,7 @@ func mergeProposal(repo *gitrepo.Repo, main, tip, branch string, author gitrepo.
 		return "", err
 	}
 	if !ok {
-		return "", fmt.Errorf("%s is missing on main", configPath)
+		return "", fmt.Errorf("accept pin proposal %s: %s is missing on main", branch, configPath)
 	}
 	out, changed, err := setConfig(data, func(c *workspace.Config) { c.Catalog.Commit = pc.Catalog.Commit })
 	if err != nil {
