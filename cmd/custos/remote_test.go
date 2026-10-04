@@ -20,3 +20,25 @@ func TestCloneRejectsNonCustosURL(t *testing.T) {
 		t.Errorf("code %d err %q", code, errs)
 	}
 }
+
+func TestPushBadAuthor(t *testing.T) {
+	code, _, errs := runCmd(t, "push", "--author", "Jane")
+	if code != 2 || !strings.Contains(errs, "--author") {
+		t.Errorf("code %d err %q", code, errs)
+	}
+}
+
+func TestPushOutsideCheckout(t *testing.T) {
+	code, _, errs := runCmd(t, "push", "--dir", t.TempDir(), "--author", "Jane Doe <jane@example.org>")
+	if code != 1 || !strings.Contains(errs, "custos push:") {
+		t.Errorf("code %d err %q", code, errs)
+	}
+}
+
+func TestPushAuthorFromEnvironment(t *testing.T) {
+	t.Setenv("CUSTOS_AUTHOR", "Jane")
+	code, _, errs := runCmd(t, "push", "--dir", t.TempDir())
+	if code != 2 || !strings.Contains(errs, "--author") {
+		t.Errorf("code %d err %q", code, errs)
+	}
+}
