@@ -10,7 +10,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | Phase | Content | Status |
 | --- | --- | --- |
 | 1 Core | Catalog and workspace formats, validation, Git over HTTP with a validating pre-receive hook, CLI `validate`, `task new-version`, `workspace create`, `serve`, container image | Done, merged to `main` on 2026-10-03 (`d0af8ad`) |
-| 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Implemented on branch `phase-2` (2026-10-04), not yet merged |
+| 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Done, merged to `main` on 2026-10-04 (`43ad0c9`) |
 | 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Not planned |
 | 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Not planned |
 
