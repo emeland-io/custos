@@ -16,8 +16,9 @@ HTTP and the command line) and the start of the second: workspaces are
 created pinned to the catalog, and pushes to a workspace are checked against
 that catalog. Answers can be written through a REST API, attachments are
 kept in a blob store on the server, and `custos clone` / `custos push` move
-them along with the Git history. Distributing catalog updates to workspaces,
-processors and the web UI follow.
+them along with the Git history. Catalog updates reach the workspaces on
+their own, as a new pin or, for frozen workspaces, as a pin proposal.
+Forking and merging workspaces, processors and the web UI follow.
 
 ## Catalog
 
@@ -105,6 +106,7 @@ workspace: 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
 catalog:
   url: https://custos.example.org/git/catalog.git
   commit: <full commit hash>
+frozen: true          # optional; see "Catalog updates and freezing"
 ```
 
 ```markdown
@@ -131,6 +133,59 @@ push to a workspace's `main` is checked against the server's catalog:
 
 `custos validate` in a workspace checkout checks the workspace on its own;
 these three rules are checked on push.
+
+## Catalog updates and freezing
+
+When the catalog's `main` advances, custos brings every workspace up to
+date. It does so right after each push to `catalog.git` and once when the
+server starts.
+
+- An **unfrozen** workspace gets a commit by `custos-bot` on its `main`
+  that moves `catalog.commit` to the new catalog commit. Existing answers
+  stay in effect; tasks with a newer version show as *pending update*.
+- A **frozen** workspace keeps its pin. custos opens a **pin proposal**
+  instead: the branch `custos/pin/<catalog-commit>`, with one commit that
+  changes the pin. A newer catalog commit replaces the open proposal.
+  Accepting it merges it into `main` (and is checked like any change of
+  `main`); rejecting it deletes it, and custos does not open it again until
+  the catalog moves on.
+
+Freeze a workspace when its documentation must not move, for example
+during an audit:
+
+```sh
+A='X-Custos-Author: Jane Doe <jane@example.org>'
+W=http://127.0.0.1:8080/api/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+curl -X POST -H "$A" $W/freeze
+curl $W/pin-diff        # pinned catalog commit compared with catalog main
+curl $W/proposals       # open pin proposals and what each one changes
+curl -X POST -H "$A" -H 'Content-Type: application/json' \
+     -d '{"branch":"custos/pin/<catalog-commit>"}' $W/proposals/accept
+curl -X POST -H "$A" $W/unfreeze   # the pin moves to catalog main right away
+```
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/workspaces/{id}/freeze` | commit `frozen: true` |
+| `POST /api/workspaces/{id}/unfreeze` | commit `frozen: false`, then move the pin and delete the proposals |
+| `GET /api/workspaces/{id}/proposals` | open proposals: `branch`, `commit`, `from`, `to`, `changes` |
+| `POST /api/workspaces/{id}/proposals/accept` | body `{"branch"}`; fast-forward or merge commit into `main` |
+| `POST /api/workspaces/{id}/proposals/reject` | body `{"branch"}`; delete the proposal |
+| `GET /api/workspaces/{id}/pin-diff` | `from` (pin), `to` (catalog main), `changes` |
+
+`changes` lists `new_versions`, `added` and `superseded` tasks and tells
+whether groups (`groups_changed`) or processors and bindings
+(`bindings_changed`) differ. Write requests need the `X-Custos-Author`
+header.
+
+A proposal is a normal branch, so it can also be merged with Git: fetch
+it, merge it into `main` and push. custos deletes the branch once the pin
+on `main` has reached the catalog's `main`.
+
+custos rewrites `custos.yaml` when it moves a pin or freezes a workspace;
+comments in that file are not kept. A workspace whose `custos.yaml` cannot
+be read is skipped and reported on the server's standard error; the other
+workspaces are still updated.
 
 ## Command line
 
