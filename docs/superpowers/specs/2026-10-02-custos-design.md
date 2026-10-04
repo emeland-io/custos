@@ -46,7 +46,7 @@ Alongside them:
 - an **index** (SQLite) built from the repos for queries; it is a cache and
   can be deleted and rebuilt at any time;
 - a **processor runner** that runs processor containers from a queue;
-- a **web UI** (Vite single-page app embedded in the binary), a REST API, and
+- a **web UI** (Vue.js and tailwindcss single-page app embedded in the binary), a REST API, and
   Git smart HTTP for clone and push.
 
 Git is the only source of truth. Repos can be cloned, edited and pushed with
