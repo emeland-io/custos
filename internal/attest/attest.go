@@ -21,7 +21,7 @@ type Result struct {
 
 // Verifier checks the signatures of a document's content.
 type Verifier interface {
-	Verify(content []byte) Result // never fails: unreadable input is Unsigned with Payload = canonical JSON of content
+	Verify(content []byte) Result // never fails: unreadable input is StatusUnsigned with Payload = canonical JSON of content
 }
 
 // Unverified is a Verifier that never checks signatures: Status is

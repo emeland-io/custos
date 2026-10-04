@@ -85,6 +85,71 @@ func TestSamePayloadWhetherSignedOrNot(t *testing.T) {
 	}
 }
 
+// TestUnwrapMalformed is a regression guard for the "never panics"
+// guarantee: it exercises nil/empty input, truncated garbage, a top-level
+// JSON null or array, and fields present with the wrong JSON type (a
+// dsseEnvelope that is a string or number, a mediaType that is a number, a
+// payloadType/payload that are numbers). All of these must fall back to
+// KindBare without panicking.
+func TestUnwrapMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		content    []byte
+		kind       string
+		signatures int
+		validJSON  bool // true: Payload == Canonical(content); false: Payload == content itself
+	}{
+		{"nil content", nil, KindBare, 0, false},
+		{"empty content", []byte{}, KindBare, 0, false},
+		{"truncated garbage", []byte(`{{{{not even close to json`), KindBare, 0, false},
+		{"top-level null", []byte(`null`), KindBare, 0, true},
+		{"top-level array", []byte(`[1,2,3]`), KindBare, 0, true},
+		{
+			"dsseEnvelope as a string",
+			[]byte(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","dsseEnvelope":"not an object"}`),
+			KindBare, 0, true,
+		},
+		{
+			"dsseEnvelope as a number",
+			[]byte(`{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","dsseEnvelope":123}`),
+			KindBare, 0, true,
+		},
+		{
+			"mediaType as a number",
+			[]byte(`{"mediaType":123,"dsseEnvelope":{}}`),
+			KindBare, 0, true,
+		},
+		{
+			"payloadType and payload as numbers",
+			[]byte(`{"payloadType":123,"payload":456,"signatures":[]}`),
+			KindBare, 0, true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Unwrap panicked on %q: %v", tc.content, r)
+				}
+			}()
+			u := Unwrap(tc.content)
+			if u.Kind != tc.kind || u.Signatures != tc.signatures {
+				t.Errorf("kind %q signatures %d, want %q %d", u.Kind, u.Signatures, tc.kind, tc.signatures)
+			}
+			want := tc.content
+			if tc.validJSON {
+				c, err := Canonical(tc.content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = c
+			}
+			if string(u.Payload) != string(want) {
+				t.Errorf("payload\n got %s\nwant %s", u.Payload, want)
+			}
+		})
+	}
+}
+
 func TestUnverified(t *testing.T) {
 	for _, content := range []string{statement, dsse(statement, base64.StdEncoding, `[{"sig":"c2ln"}]`), `not json`} {
 		r := Unverified.Verify([]byte(content))
