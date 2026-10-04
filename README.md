@@ -229,6 +229,7 @@ names another one. Markdown answers use `body`, all other types `value`:
 
 ```sh
 curl -X PUT -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+  -H 'Content-Type: application/json' \
   -d '{"value": "built by the release pipeline"}' \
   http://127.0.0.1:8080/api/workspaces/<workspace-uuid>/answers/<task-uuid>
 ```
