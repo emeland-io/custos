@@ -177,12 +177,15 @@ func rejected(tid, format string, args ...any) error {
 }
 
 // normalizeBody returns the body as reading the file back yields it: "\n"
-// line endings and a final newline (frontmatter.Split). Without this,
-// saving the same answer twice would make a second commit.
+// line endings and a final newline (frontmatter.Split). The final newline
+// is added before folding "\r\n" to "\n", so a body ending in a lone "\r"
+// (no trailing "\n" at all) comes out as "...\n", not "...\r\n" — matching
+// what Split would read back from the file, where the "\r\n" it just
+// became is itself folded. Without this, saving the same answer twice
+// would make a second commit.
 func normalizeBody(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
 	if s != "" && !strings.HasSuffix(s, "\n") {
 		s += "\n"
 	}
-	return s
+	return strings.ReplaceAll(s, "\r\n", "\n")
 }

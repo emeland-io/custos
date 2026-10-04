@@ -210,3 +210,41 @@ func TestPutAnswerTabValueIsIdempotent(t *testing.T) {
 		t.Errorf("saving the same tab-leading answer again made commit %s after %s", again.Commit, first.Commit)
 	}
 }
+
+func TestNormalizeBody(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"no final newline", "abc", "abc\n"},
+		{"crlf", "abc\r\ndef\r\n", "abc\ndef\n"},
+		{"lone trailing cr, no newline", "abc\r", "abc\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeBody(tt.in); got != tt.want {
+				t.Errorf("normalizeBody(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPutAnswerBodyEndingInLoneCR guards against normalizeBody adding the
+// final newline before folding "\r\n" to "\n": doing it in that order turns
+// a body ending in a lone "\r" into "...\r\n", so the PUT response (built
+// from the in-memory body) would show a trailing "\r" that GET (which reads
+// the file back through frontmatter.Split) does not.
+func TestPutAnswerBodyEndingInLoneCR(t *testing.T) {
+	e := newEnv(t, testCatalog())
+	e.createWorkspace(t)
+	path := "/api/workspaces/" + fixture.WorkspaceID + "/answers/" + taskMarkdown
+	putBody := jsonBody(t, map[string]string{"body": "abc\r"})
+	want := "abc\n"
+	got := decode[answerResponse](t, put(t, e, taskMarkdown, janeHeader, putBody), http.StatusOK)
+	if got.Body != want {
+		t.Errorf("PUT response body %q, want %q", got.Body, want)
+	}
+	if got := decode[answerJSON](t, e.do(t, "GET", path, "", ""), http.StatusOK); got.Body != want {
+		t.Errorf("GET body %q, want %q", got.Body, want)
+	}
+}
