@@ -28,11 +28,10 @@ func (a *API) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []workspaceJSON{}
 	for _, id := range ids {
-		cfg, err := a.config(id)
-		if err != nil {
-			WriteError(w, err)
-			return
-		}
+		// A repo-level error (a broken repository, not just a missing ref
+		// or file) must not break the whole list: list that workspace with
+		// the zero config instead, as if its main had nothing to say yet.
+		cfg, _ := a.config(id)
 		out = append(out, workspaceJSON{ID: id, Pin: cfg.Catalog.Commit, Frozen: cfg.Frozen})
 	}
 	WriteJSON(w, http.StatusOK, out)

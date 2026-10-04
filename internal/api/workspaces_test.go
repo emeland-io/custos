@@ -3,6 +3,8 @@ package api
 import (
 	"cmp"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -60,6 +62,43 @@ func TestCreateWorkspaceErrors(t *testing.T) {
 	}
 	if ids, err := e.st.WorkspaceIDs(); err != nil || len(ids) != 1 {
 		t.Errorf("workspaces after failed creates: %v %v", ids, err)
+	}
+}
+
+// TestListWorkspacesSkipsBrokenRepo covers the plan's rule that one broken
+// workspace must not break the list: a workspace whose repository has lost
+// its objects directory makes ResolveRef return a genuine error (not just
+// "ref not found"), which must not fail the whole GET /api/workspaces.
+func TestListWorkspacesSkipsBrokenRepo(t *testing.T) {
+	e := newEnv(t, fixture.Catalog())
+	e.createWorkspace(t)
+	const brokenID = "0a1b2c3d-4e5f-4061-8a9b-0c1d2e3f4a5b"
+	if err := e.st.CreateWorkspace(brokenID, jane); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := e.st.WorkspaceRepo(brokenID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(repo.Dir, "objects")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := decode[[]workspaceJSON](t, e.do(t, "GET", "/api/workspaces", "", ""), http.StatusOK)
+	var found bool
+	for _, wj := range got {
+		if wj.ID == fixture.WorkspaceID {
+			found = true
+			if wj.Pin != e.catalogCommit || wj.Frozen {
+				t.Errorf("healthy workspace %+v", wj)
+			}
+		}
+		if wj.ID == brokenID && (wj.Pin != "" || wj.Frozen) {
+			t.Errorf("broken workspace %+v, want zero pin and frozen false", wj)
+		}
+	}
+	if !found {
+		t.Errorf("healthy workspace %s missing from list %+v", fixture.WorkspaceID, got)
 	}
 }
 
