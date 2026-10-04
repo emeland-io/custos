@@ -101,13 +101,16 @@ func movePin(st *store.Store, id, head string) error {
 	return err
 }
 
-// propose makes sure branch custos/pin/<head> exists. A new branch starts at
-// main with one commit by custos-bot that changes the pin. An existing
-// branch is kept as it is, even when main has moved on; Accept handles that.
+// propose makes sure branch custos/pin/<head> exists, unless the proposal
+// for head was rejected. A new branch starts at main with one commit by
+// custos-bot that changes the pin. An existing branch is kept as it is,
+// even when main has moved on; Accept handles that.
 func propose(st *store.Store, id string, repo *gitrepo.Repo, head string) error {
 	ref := pinRefPrefix + head
-	if _, ok, err := repo.ResolveRef(ref); err != nil || ok {
-		return err
+	for _, existing := range []string{ref, rejectedRefPrefix + head} {
+		if _, ok, err := repo.ResolveRef(existing); err != nil || ok {
+			return err
+		}
 	}
 	_, err := st.UpdateWorkspace(id, ref, gitrepo.Bot, "Propose catalog commit "+head, func(tree fs.FS) ([]gitrepo.Change, error) {
 		return editConfig(tree, func(c *workspace.Config) { c.Catalog.Commit = head })
@@ -115,12 +118,15 @@ func propose(st *store.Store, id string, repo *gitrepo.Repo, head string) error 
 	return err
 }
 
-// prune deletes the pin proposal branches other than custos/pin/<keep>;
-// keep "" deletes them all.
+// prune deletes the pin proposal branches and rejection marks other than
+// those for catalog commit keep; keep "" deletes them all.
 func prune(st *store.Store, id string, repo *gitrepo.Repo, keep string) error {
 	unlock := st.Lock(id)
 	defer unlock()
-	return pruneRefs(repo, pinRefPrefix, keep)
+	if err := pruneRefs(repo, pinRefPrefix, keep); err != nil {
+		return err
+	}
+	return pruneRefs(repo, rejectedRefPrefix, keep)
 }
 
 // pruneRefs deletes the refs below prefix except prefix+keep. The caller
