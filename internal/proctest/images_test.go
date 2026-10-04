@@ -2,9 +2,13 @@ package proctest_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -131,5 +135,70 @@ func TestLongLogIsTruncated(t *testing.T) {
 	parse(t, res)
 	if len(res.Log) != runner.MaxLogSize+len("\n[log truncated]\n") || !strings.HasSuffix(string(res.Log), "x\n[log truncated]\n") {
 		t.Errorf("log of %d bytes ending %q", len(res.Log), res.Log[max(0, len(res.Log)-40):])
+	}
+}
+
+func TestSignWrapsDocumentsInSignedEnvelopes(t *testing.T) {
+	secrets, pubPEM := proctest.SigningKey(t)
+	block, _ := pem.Decode(pubPEM)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		t.Fatalf("public key %s", pubPEM)
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := runner.Config{SecretsDir: secrets}
+	in, err := json.Marshal(contract.NewInput(fixture.WorkspaceID,
+		&task.Version{Meta: task.Meta{ID: fixture.TaskB, Version: "1.0.0", Title: "Hosts", AnswerType: task.AnswerText}},
+		&workspace.Answer{Task: fixture.TaskB, TaskVersion: "1.0.0", Type: task.AnswerText, Value: "task a A\ndoc slsa:web-01 web-01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := runner.New(cfg).Run(context.Background(), runner.Job{
+		Image: proctest.Image(t, "sign"), Input: in, Secrets: []string{proctest.SigningKeySecret},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := parse(t, res)
+	if len(out.Tasks) != 1 || len(out.Documents) != 1 || out.Documents[0].MediaType != "application/vnd.in-toto+json" {
+		t.Fatalf("output %+v", out)
+	}
+	var env struct {
+		PayloadType string `json:"payloadType"`
+		Payload     []byte `json:"payload"` // base64 in JSON
+		Signatures  []struct {
+			Sig []byte `json:"sig"`
+		} `json:"signatures"`
+	}
+	if err := json.Unmarshal(out.Documents[0].Content, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.PayloadType != "application/vnd.in-toto+json" || len(env.Signatures) != 1 {
+		t.Fatalf("envelope %s", out.Documents[0].Content)
+	}
+	sum := sha256.Sum256([]byte("web-01"))
+	if !strings.Contains(string(env.Payload), `"name":"web-01"`) || !strings.Contains(string(env.Payload), hex.EncodeToString(sum[:])) {
+		t.Errorf("payload %s", env.Payload)
+	}
+	pae := fmt.Appendf(nil, "DSSEv1 %d %s %d %s", len(env.PayloadType), env.PayloadType, len(env.Payload), env.Payload)
+	if !ed25519.Verify(pub.(ed25519.PublicKey), pae, env.Signatures[0].Sig) {
+		t.Error("signature does not verify with the public key from SigningKey")
+	}
+}
+
+func TestSignWithoutKeyExits2(t *testing.T) {
+	res := run(t, runner.Config{}, "sign", "doc a b", false)
+	if res.ExitCode != 2 || len(res.Stdout) != 0 || !strings.Contains(string(res.Log), "test-signing-key") {
+		t.Errorf("exit %d, stdout %q, log %q", res.ExitCode, res.Stdout, res.Log)
+	}
+}
+
+func TestSigningKeysDiffer(t *testing.T) {
+	_, a := proctest.SigningKey(t)
+	_, b := proctest.SigningKey(t)
+	if string(a) == string(b) {
+		t.Error("two calls returned the same key")
 	}
 }

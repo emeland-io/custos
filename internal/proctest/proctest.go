@@ -7,6 +7,10 @@ package proctest
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +21,10 @@ import (
 	"sync"
 	"testing"
 )
+
+// SigningKeySecret is the secret name SigningKey writes and the sign image
+// reads.
+const SigningKeySecret = "test-signing-key"
 
 // Names lists the test images Image can build.
 var Names = []string{"echo", "generate", "sign", "fail", "loop"}
@@ -92,4 +100,31 @@ func build(name string) (string, error) {
 		return "", fmt.Errorf("docker build printed %q, want an image id sha256:<64 hex digits>", id)
 	}
 	return "custos.test/" + name + "@" + id, nil
+}
+
+// SigningKey writes a fresh ed25519 private key (PKCS#8 PEM) as secret
+// "test-signing-key" into a new temp directory and returns that secrets
+// directory and the matching public key (PKIX PEM).
+func SigningKey(t testing.TB) (secretsDir string, publicKeyPEM []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretsDir = t.TempDir()
+	// 0644: the container drops all capabilities, so even its root user
+	// can read only files the permissions allow.
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})
+	if err := os.WriteFile(filepath.Join(secretsDir, SigningKeySecret), keyPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return secretsDir, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
 }
