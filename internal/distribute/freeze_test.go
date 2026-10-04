@@ -89,6 +89,25 @@ func TestFreezeUnknownWorkspace(t *testing.T) {
 	}
 }
 
+// TestFreezeWorkspaceWithoutMain checks that Freeze and Unfreeze answer
+// store.ErrNotFound, not a bare error from reading a custos.yaml that does
+// not exist yet, when the workspace repository exists but has no main
+// branch (for example still being created by a fork), consistent with
+// Accept and pin-diff.
+func TestFreezeWorkspaceWithoutMain(t *testing.T) {
+	st := newStore(t)
+	commitCatalog(t, st, fixture.Catalog())
+	if _, err := st.CreateWorkspaceRepo(wsA); err != nil {
+		t.Fatal(err)
+	}
+	if err := Freeze(st, wsA, person); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("freeze: err %v, want store.ErrNotFound", err)
+	}
+	if err := Unfreeze(st, wsA, person); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("unfreeze: err %v, want store.ErrNotFound", err)
+	}
+}
+
 func TestFreezeOpensProposalForLaggingPin(t *testing.T) {
 	st := newStore(t)
 	commitCatalog(t, st, fixture.Catalog())

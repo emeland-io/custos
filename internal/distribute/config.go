@@ -14,10 +14,18 @@ import (
 
 	"github.com/emeland-io/custos/internal/frontmatter"
 	"github.com/emeland-io/custos/internal/gitrepo"
+	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/workspace"
 )
 
 const configPath = "custos.yaml"
+
+// errNoMain reports that workspace id has no main branch yet (for example
+// still being created by a fork), consistently across every entry point
+// that needs main to exist.
+func errNoMain(id string) error {
+	return fmt.Errorf("workspace %s has no main branch: %w", id, store.ErrNotFound)
+}
 
 // decodeConfig reads custos.yaml strictly: an unknown field is an error, so
 // rewriting the file can never drop a field custos does not know.

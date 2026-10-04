@@ -35,11 +35,14 @@ func Proposals(st *store.Store, id string) ([]PinProposal, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []PinProposal{}
 	main, ok, err := repo.ResolveRef(mainRef)
-	if err != nil || !ok {
-		return out, err
+	if err != nil {
+		return nil, err
 	}
+	if !ok {
+		return nil, errNoMain(id)
+	}
+	out := []PinProposal{}
 	cfg, err := readConfig(repo, main)
 	if err != nil {
 		return nil, err
@@ -100,7 +103,7 @@ func Accept(st *store.Store, id, branch string, author gitrepo.Signature) error 
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("workspace %s has no main branch: %w", id, store.ErrNotFound)
+		return errNoMain(id)
 	}
 	next := tip
 	ff, err := repo.IsAncestor(main, tip)

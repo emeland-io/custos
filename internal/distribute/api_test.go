@@ -158,6 +158,27 @@ func TestAPIReject(t *testing.T) {
 	}
 }
 
+// TestAPIWorkspaceWithoutMain checks that a workspace repository that
+// exists but has no main branch yet answers 404, not 500, the same as an
+// unknown workspace.
+func TestAPIWorkspaceWithoutMain(t *testing.T) {
+	st := newStore(t)
+	commitCatalog(t, st, fixture.Catalog())
+	if _, err := st.CreateWorkspaceRepo(wsA); err != nil {
+		t.Fatal(err)
+	}
+	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
+	for _, c := range []struct{ method, path, author string }{
+		{"GET", "/proposals", ""},
+		{"POST", "/freeze", authorHeader},
+		{"POST", "/unfreeze", authorHeader},
+	} {
+		if code, body := call(t, c.method, ws+c.path, c.author, ""); code != http.StatusNotFound {
+			t.Errorf("%s %s: %d %s, want 404", c.method, c.path, code, body)
+		}
+	}
+}
+
 func TestAPIUnknownWorkspace(t *testing.T) {
 	st := newStore(t)
 	commitCatalog(t, st, fixture.Catalog())

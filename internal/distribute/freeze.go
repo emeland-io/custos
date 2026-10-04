@@ -41,7 +41,16 @@ func Unfreeze(st *store.Store, id string, author gitrepo.Signature) error {
 func setFrozen(st *store.Store, id string, author gitrepo.Signature, frozen bool, message string) error {
 	mu.Lock()
 	defer mu.Unlock()
-	_, err := st.UpdateWorkspace(id, mainRef, author, message, func(tree fs.FS) ([]gitrepo.Change, error) {
+	repo, err := st.WorkspaceRepo(id)
+	if err != nil {
+		return err
+	}
+	if _, ok, err := repo.ResolveRef(mainRef); err != nil {
+		return err
+	} else if !ok {
+		return errNoMain(id)
+	}
+	_, err = st.UpdateWorkspace(id, mainRef, author, message, func(tree fs.FS) ([]gitrepo.Change, error) {
 		return editConfig(tree, func(c *workspace.Config) { c.Frozen = frozen })
 	})
 	if err != nil {

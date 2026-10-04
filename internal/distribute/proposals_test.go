@@ -55,6 +55,21 @@ func TestProposals(t *testing.T) {
 	}
 }
 
+// TestProposalsWorkspaceWithoutMain checks that Proposals answers
+// store.ErrNotFound, not a silent empty list, for a workspace repository
+// that exists but has no main branch yet, consistent with Accept and
+// pin-diff.
+func TestProposalsWorkspaceWithoutMain(t *testing.T) {
+	st := newStore(t)
+	commitCatalog(t, st, fixture.Catalog())
+	if _, err := st.CreateWorkspaceRepo(wsA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Proposals(st, wsA); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("err %v, want store.ErrNotFound", err)
+	}
+}
+
 func TestAcceptFastForward(t *testing.T) {
 	st, repo, _, c2 := frozenWithProposal(t)
 	branch := "custos/pin/" + c2

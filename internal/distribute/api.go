@@ -133,7 +133,7 @@ func pinDiff(st *store.Store, id string) (pinDiffResponse, error) {
 		return pinDiffResponse{}, err
 	}
 	if !ok {
-		return pinDiffResponse{}, fmt.Errorf("workspace %s has no main branch: %w", id, store.ErrNotFound)
+		return pinDiffResponse{}, errNoMain(id)
 	}
 	cfg, err := readConfig(repo, main)
 	if err != nil {
