@@ -2,11 +2,13 @@ package merge
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gitrepo"
+	"github.com/emeland-io/custos/internal/gittest"
 	"github.com/emeland-io/custos/internal/problem"
 	"github.com/emeland-io/custos/internal/store"
 )
@@ -78,6 +80,39 @@ func TestForkInvalidID(t *testing.T) {
 		if err := Fork(e.st, ws, id, alice); !errors.Is(err, ErrInvalid) {
 			t.Errorf("Fork to %q: %v, want ErrInvalid", id, err)
 		}
+	}
+}
+
+func TestForkConflictKeepsPush(t *testing.T) {
+	e := setup(t)
+	var pushed string
+	beforeForkUpdate = func() {
+		repo, err := e.st.WorkspaceRepo(forkID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Simulate a push landing in the window between CreateWorkspaceRepo
+		// and forkInto's own UpdateRef.
+		pushed = gittest.Run(t, repo.Dir, "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "pushed")
+		if err := repo.UpdateRef(mainRef, pushed, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeForkUpdate = func() {} })
+
+	err := Fork(e.st, ws, forkID, alice)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("Fork while the new main was pushed concurrently: %v, want ErrConflict", err)
+	}
+	repo, statErr := e.st.WorkspaceRepo(forkID)
+	if statErr != nil {
+		t.Fatalf("the repository with the accepted push must survive: %v", statErr)
+	}
+	if _, err := os.Stat(repo.Dir); err != nil {
+		t.Errorf("the repository with the accepted push must survive: %v", err)
+	}
+	if got := ref(t, e.st, forkID, mainRef); got != pushed {
+		t.Errorf("the push must not be overwritten, got %q", got)
 	}
 }
 

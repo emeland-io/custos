@@ -20,6 +20,10 @@ const forkRef = "refs/custos/fork-source"
 // pass the existence check and then remove each other's repository.
 var forkMu sync.Mutex
 
+// beforeForkUpdate runs just before forkInto moves the new workspace's
+// main. Tests replace it to simulate a push landing first.
+var beforeForkUpdate = func() {}
+
 // Fork creates workspace newID from the history of srcID's main branch: a
 // new repository (store.CreateWorkspaceRepo) whose main is one commit, by
 // author, on top of srcID's main that sets the workspace id in custos.yaml.
@@ -56,9 +60,14 @@ func Fork(st *store.Store, srcID, newID string, author gitrepo.Signature) error 
 	// missing main as their base.
 	unlock := st.Lock(newID)
 	defer unlock()
+	// A conflict on the final UpdateRef means a push already landed on the
+	// new workspace's main; removing the repository then would erase that
+	// accepted push (store.finishCreateWorkspace avoids the same mistake).
 	if err := forkInto(st, src, dst, srcID, newID, author); err != nil {
-		if rmErr := os.RemoveAll(dst.Dir); rmErr != nil {
-			return errors.Join(err, rmErr)
+		if !errors.Is(err, store.ErrConflict) {
+			if rmErr := os.RemoveAll(dst.Dir); rmErr != nil {
+				return errors.Join(err, rmErr)
+			}
 		}
 		return err
 	}
@@ -108,6 +117,7 @@ func forkInto(st *store.Store, src, dst *gitrepo.Repo, srcID, newID string, auth
 	if err := dst.DeleteRef(forkRef, base); err != nil {
 		return err
 	}
+	beforeForkUpdate()
 	if err := dst.UpdateRef(mainRef, commit, ""); err != nil {
 		if errors.Is(err, gitrepo.ErrRefMoved) {
 			return fmt.Errorf("%w: %v", store.ErrConflict, err)
