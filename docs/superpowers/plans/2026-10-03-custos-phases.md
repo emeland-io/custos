@@ -10,7 +10,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | Phase | Content | Status |
 | --- | --- | --- |
 | 1 Core | Catalog and workspace formats, validation, Git over HTTP with a validating pre-receive hook, CLI `validate`, `task new-version`, `workspace create`, `serve`, container image | Done, merged to `main` on 2026-10-03 (`d0af8ad`) |
-| 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | 4 plans written, not started |
+| 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Implemented on branch `phase-2` (2026-10-04), not yet merged |
 | 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Not planned |
 | 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Not planned |
 
@@ -27,14 +27,23 @@ The plans run in order, and each needs the ones before it.
 
 | Plan | Content | Tasks | Status |
 | --- | --- | --- | --- |
-| [2a](2026-10-03-phase-2a-store.md) | Server-side writes to the repositories, pushes checked against the pinned catalog, status and book | 10 | Not started |
-| [2b](2026-10-03-phase-2b-api.md) | Attachment store, REST API for workspaces, answers, attachments and the catalog, plus `custos clone`/`push` | 12 | Not started |
-| [2c](2026-10-03-phase-2c-distribution.md) | Catalog updates reaching workspaces, freeze, catalog-update proposals with accept/reject | 8 | Not started |
-| [2d](2026-10-03-phase-2d-fork-merge.md) | Workspace fork and merge with conflict resolution | 6 | Not started |
+| [2a](2026-10-03-phase-2a-store.md) | Server-side writes to the repositories, pushes checked against the pinned catalog, status and book | 10 | Done |
+| [2b](2026-10-03-phase-2b-api.md) | Attachment store, REST API for workspaces, answers, attachments and the catalog, plus `custos clone`/`push` | 12 | Done |
+| [2c](2026-10-03-phase-2c-distribution.md) | Catalog updates reaching workspaces, freeze, catalog-update proposals with accept/reject | 8 | Done |
+| [2d](2026-10-03-phase-2d-fork-merge.md) | Workspace fork and merge with conflict resolution | 6 + 1 added | Done |
 
 How the plans were made: four subagents wrote them in parallel from a shared architecture note, [2026-10-03-phase-2-architecture.md](2026-10-03-phase-2-architecture.md). A fifth reviewed them as a set. It found that the plans wired the API into `serve` incompatibly, that one code block didn't compile, and that the README steps overwrote each other, and it fixed all of these in the plan text. It then applied all four plans in order to a scratch copy of the repository; the result passes `gofmt`, `go vet` and `go test -race`.
 
-Rulings: spec §11.2 holds 41 rulings made while planning (2.1–2.41). These six change the spec and deserve a look first:
+Executed with subagent-driven development on branch `phase-2`: one implementer and one reviewer per task, then a whole-plan review on the most capable model after each plan, a single fix wave for its findings, and a scoped re-review of that wave.
+
+What the whole-plan reviews found and what was fixed:
+
+- **2a:** a tag named `refs/tags/refs/heads/main` could stand in for a missing `main`, so a workspace could be pinned to an unvalidated catalog commit (ruling 2.42); catalog pushes to `/git/catalog` without `.git` skipped distribution (2.45). Five smaller fixes in the same wave.
+- **2b:** answer text whose first line starts with a tab was refused with a YAML error (2.48); `custos push --all`/`--tags`/`--mirror` could leave attachments unuploaded for good (2.50). Four smaller fixes.
+- **2c:** distribution ignored `custos.yaml` changes made by push and never retried a lost race (2.53); freeze and unfreeze reported failure for a change that had been made (2.54).
+- **2d:** an added task (5b) makes merges and forks through the API trigger distribution too (2.53). The review found only minor issues; a fork no longer deletes a push that won its race (2.46), and choosing a side for a `custos.yaml` conflict keeps `main`'s id (2.56).
+
+Rulings: spec §11.2 holds 41 rulings made while planning (2.1–2.41) and 15 made during execution (2.42–2.56). These six change the spec and deserve a look first:
 
 | Ruling | What changes |
 | --- | --- |
