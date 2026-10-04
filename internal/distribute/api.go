@@ -2,6 +2,7 @@ package distribute
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -73,11 +74,18 @@ func frozenHandler(st *store.Store, frozen bool) http.HandlerFunc {
 		if frozen {
 			set = Freeze
 		}
+		resp := map[string]any{"id": id, "frozen": frozen}
 		if err := set(st, id, author); err != nil {
-			api.WriteError(w, err)
-			return
+			var de *DistributeError
+			if !errors.As(err, &de) {
+				api.WriteError(w, err)
+				return
+			}
+			// The flag was already committed; tell the client it worked,
+			// with a warning, instead of answering as if it had not.
+			resp["warning"] = de.Cause.Error()
 		}
-		api.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "frozen": frozen})
+		api.WriteJSON(w, http.StatusOK, resp)
 	}
 }
 

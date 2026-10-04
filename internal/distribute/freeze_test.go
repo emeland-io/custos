@@ -36,6 +36,48 @@ func TestFreeze(t *testing.T) {
 	}
 }
 
+// TestUnfreezeReturnsWarningWhenPinMoveFails checks that Unfreeze does not
+// fail the caller when the frozen:false commit succeeds but the follow-up
+// reconcile cannot move the pin: the client asked to unfreeze and that part
+// worked, so the failure must come back as a warning (a *DistributeError),
+// not as the error that would undo the already-committed flag.
+func TestUnfreezeReturnsWarningWhenPinMoveFails(t *testing.T) {
+	st := newStore(t)
+	c1 := commitCatalog(t, st, fixture.Catalog())
+	createWorkspace(t, st, wsA)
+	answerA(t, st, wsA) // answers TaskA 1.0.0, valid against the current pin
+	if err := Freeze(st, wsA, person); err != nil {
+		t.Fatal(err)
+	}
+	main := resolve(t, wsRepo(t, st, wsA), "refs/heads/main")
+	// Remove TaskA from the catalog's new main without validation (as if an
+	// operator edited the catalog's git history directly), so moving the
+	// pin to it would invalidate the workspace's existing answer.
+	commitCatalog(t, st, nil, fixture.TaskPath(fixture.TaskA, "1.0.0"), fixture.TaskPath(fixture.TaskA, "1.1.0"))
+
+	err := Unfreeze(st, wsA, person)
+	var de *DistributeError
+	if !errors.As(err, &de) {
+		t.Fatalf("err %v (%T), want *DistributeError", err, err)
+	}
+	var rej *store.RejectedError
+	if !errors.As(err, &rej) {
+		t.Errorf("err %v does not unwrap to a *store.RejectedError", err)
+	}
+
+	repo := wsRepo(t, st, wsA)
+	if got := resolve(t, repo, "refs/heads/main"); got == main {
+		t.Error("the frozen:false commit was not made despite the warning")
+	}
+	c := configAt(t, repo, "refs/heads/main")
+	if c.Frozen {
+		t.Errorf("config %+v, want unfrozen even though the pin move failed", c)
+	}
+	if c.Catalog.Commit != c1 {
+		t.Errorf("pin %s, want it unchanged at %s since the move was rejected", c.Catalog.Commit, c1)
+	}
+}
+
 func TestFreezeUnknownWorkspace(t *testing.T) {
 	st := newStore(t)
 	commitCatalog(t, st, fixture.Catalog())

@@ -109,6 +109,44 @@ func TestAPIFreezeProposeAccept(t *testing.T) {
 	}
 }
 
+// TestAPIUnfreezeWarnsOnFailedReconcile checks that the unfreeze endpoint
+// answers 200 with a "warning" field, not an error status, when the
+// frozen:false commit succeeds but moving the pin fails: the client's
+// request was honoured, so an error status would wrongly tell it otherwise.
+func TestAPIUnfreezeWarnsOnFailedReconcile(t *testing.T) {
+	st := newStore(t)
+	commitCatalog(t, st, fixture.Catalog())
+	createWorkspace(t, st, wsA)
+	answerA(t, st, wsA)
+	if err := Freeze(st, wsA, person); err != nil {
+		t.Fatal(err)
+	}
+	commitCatalog(t, st, nil, fixture.TaskPath(fixture.TaskA, "1.0.0"), fixture.TaskPath(fixture.TaskA, "1.1.0"))
+	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
+
+	code, body := call(t, "POST", ws+"/unfreeze", authorHeader, "")
+	if code != http.StatusOK {
+		t.Fatalf("unfreeze: %d %s, want 200 with a warning", code, body)
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Frozen  bool   `json:"frozen"`
+		Warning string `json:"warning"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("unmarshal %s: %v", body, err)
+	}
+	if resp.Frozen {
+		t.Errorf("response %+v, want frozen false", resp)
+	}
+	if resp.Warning == "" {
+		t.Errorf("response %+v, want a non-empty warning", resp)
+	}
+	if c := configAt(t, wsRepo(t, st, wsA), "refs/heads/main"); c.Frozen {
+		t.Errorf("config %+v, flag not committed despite the 200", c)
+	}
+}
+
 func TestAPIReject(t *testing.T) {
 	st, _, _, c2 := frozenWithProposal(t)
 	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
