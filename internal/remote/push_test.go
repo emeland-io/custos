@@ -12,6 +12,65 @@ import (
 	"github.com/emeland-io/custos/internal/workspace"
 )
 
+// TestPushAllScansEveryBranch verifies that --all (and by extension
+// --branches/--mirror/--tags, exercised in TestSources) makes custos push
+// look at every branch's new commits, not only HEAD's.
+func TestPushAllScansEveryBranch(t *testing.T) {
+	s := startServer(t)
+	dir := cloneWorkspace(t, s)
+
+	// draft diverges from main's current tip and never becomes an
+	// ancestor of main, so a HEAD-only scan cannot find its attachment.
+	gittest.Run(t, dir, "checkout", "-q", "-b", "draft")
+	shaDraft := hash("on draft\n")
+	writeLocalBlob(t, dir, shaDraft, "on draft\n")
+	commitAnswer(t, dir, shaDraft)
+
+	gittest.Run(t, dir, "checkout", "-q", "main")
+	shaMain := hash("on main\n")
+	writeLocalBlob(t, dir, shaMain, "on main\n")
+	commitAnswer(t, dir, shaMain)
+
+	var log bytes.Buffer
+	if err := Push(dir, "origin", []string{"--all"}, jane, &log); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	if !s.bl.Has(shaMain) {
+		t.Error("push --all did not upload the attachment on main")
+	}
+	if !s.bl.Has(shaDraft) {
+		t.Error("push --all did not upload the attachment on draft, which HEAD cannot see")
+	}
+}
+
+// TestPushHealsAttachmentMissedByPlainGitPush covers the self-heal case: a
+// commit that reached the remote through a plain git push (so its
+// attachment was never uploaded) must still get its attachment uploaded
+// the next time custos push runs, even though rev-list finds no new
+// commits to scan.
+func TestPushHealsAttachmentMissedByPlainGitPush(t *testing.T) {
+	s := startServer(t)
+	dir := cloneWorkspace(t, s)
+	sha := hash("build log\n")
+	writeLocalBlob(t, dir, sha, "build log\n")
+	commitAnswer(t, dir, sha)
+
+	// Bypass custos push entirely: the commit reaches the remote, but the
+	// blob store never hears about the attachment it references.
+	gittest.Run(t, dir, "push", "-q", "origin", "main")
+	if s.bl.Has(sha) {
+		t.Fatal("test setup: the blob should not be on the server yet")
+	}
+
+	var log bytes.Buffer
+	if err := Push(dir, "origin", []string{"main"}, jane, &log); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	if !s.bl.Has(sha) {
+		t.Error("self-heal: the attachment on the pushed tip was not uploaded")
+	}
+}
+
 // cloneWorkspace clones the workspace of s into a temporary directory.
 func cloneWorkspace(t *testing.T, s *testServer) string {
 	t.Helper()
@@ -131,6 +190,17 @@ func TestSources(t *testing.T) {
 		{[]string{":refs/heads/old"}, nil},
 		{[]string{"--force", "main", "draft:draft"}, []string{"main", "draft"}},
 		{[]string{"--force"}, []string{"HEAD"}},
+		{[]string{"--all"}, []string{"--branches"}},
+		{[]string{"--branches"}, []string{"--branches"}},
+		{[]string{"--mirror"}, []string{"--all"}},
+		{[]string{"--tags"}, []string{"--tags"}},
+		{[]string{"-o", "ci.skip", "main"}, []string{"main"}},
+		{[]string{"--push-option", "ci.skip", "main"}, []string{"main"}},
+		{[]string{"--push-option=ci.skip", "main"}, []string{"main"}},
+		{[]string{"--repo", "origin", "main"}, []string{"main"}},
+		{[]string{"--receive-pack", "/usr/bin/git-receive-pack", "main"}, []string{"main"}},
+		{[]string{"--receive-pack=/usr/bin/git-receive-pack", "main"}, []string{"main"}},
+		{[]string{"--exec", "/usr/bin/git-receive-pack", "main"}, []string{"main"}},
 	}
 	for _, tt := range tests {
 		if got := sources(tt.args); !slices.Equal(got, tt.want) {

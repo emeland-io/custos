@@ -1,6 +1,8 @@
 package remote
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +36,16 @@ func Push(dir, remoteName string, args []string, author gitrepo.Signature, log i
 		if err != nil {
 			return err
 		}
-		ats, err := attachments(dir, strings.Fields(out))
+		// Self-heal: also check the tip trees of the refs being pushed, not
+		// only the commits rev-list finds new. A ref that reached the
+		// remote once already (a plain git push, or an earlier custos push
+		// that failed after git push ran) leaves rev-list with nothing to
+		// report, but its attachments may still be missing on the server.
+		tips, err := tipRevs(dir, revs)
+		if err != nil {
+			return err
+		}
+		ats, err := attachments(dir, append(strings.Fields(out), tips...))
 		if err != nil {
 			return err
 		}
@@ -52,25 +63,75 @@ func Push(dir, remoteName string, args []string, author gitrepo.Signature, log i
 	return nil
 }
 
-// sources returns the local side of each refspec in args, skipping flags
-// and deletions; HEAD when args name no refspec, as git push does then.
+// bulkRevListFlags maps a git push flag that selects many refs at once to
+// the git rev-list flag that selects the same commits.
+var bulkRevListFlags = map[string]string{
+	"--all":      "--branches",
+	"--branches": "--branches",
+	"--mirror":   "--all",
+	"--tags":     "--tags",
+}
+
+// valueFlags are git push flags whose value is a separate argument (or
+// follows "=" in the same argument), never a refspec.
+var valueFlags = map[string]bool{
+	"-o": true, "--push-option": true,
+	"--repo": true, "--receive-pack": true, "--exec": true,
+}
+
+// sources returns the git rev-list arguments that select the commits a
+// push with args would send: the local side of each refspec, or the
+// rev-list equivalent of a bulk flag (--all/--branches, --mirror, --tags).
+// HEAD when args select nothing explicitly, as git push does then.
 func sources(args []string) []string {
 	var revs []string
-	refspecs := 0
+	selected := false
+	skipNext := false
 	for _, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if valueFlags[arg] {
+			skipNext = true // the next argument is this flag's value
+			continue
+		}
+		if name, _, ok := strings.Cut(arg, "="); ok && valueFlags[name] {
+			continue // the --flag=value form
+		}
+		if rl, ok := bulkRevListFlags[arg]; ok {
+			revs = append(revs, rl)
+			selected = true
+			continue
+		}
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
-		refspecs++
+		selected = true
 		src, _, _ := strings.Cut(strings.TrimPrefix(arg, "+"), ":")
 		if src != "" {
 			revs = append(revs, src)
 		}
 	}
-	if refspecs == 0 {
+	if !selected {
 		return []string{"HEAD"}
 	}
 	return revs
+}
+
+// tipRevs resolves revs (as sources returns them, possibly including
+// rev-list flags such as --branches) to the concrete commit hashes they
+// name, for the self-heal check of tip trees in Push.
+func tipRevs(dir string, revs []string) ([]string, error) {
+	var tips []string
+	for _, rev := range revs {
+		out, err := git(dir, "rev-parse", rev)
+		if err != nil {
+			return nil, err
+		}
+		tips = append(tips, strings.Fields(out)...)
+	}
+	return tips, nil
 }
 
 // ensureUploaded uploads one attachment unless the server has it.
@@ -88,15 +149,25 @@ func ensureUploaded(dir, server string, at attachment, author gitrepo.Signature,
 		return err
 	}
 	defer f.Close()
-	info, err := f.Stat()
+	// Hash the local file before uploading it: a mismatch is refused here,
+	// with nothing sent to the server.
+	h := sha256.New()
+	size, err := io.Copy(h, f)
 	if err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != at.sha {
+		return fmt.Errorf("attachment %q: %s holds content with hash %s, not %s; nothing was pushed",
+			at.name, localBlob(dir, at.sha), got, at.sha)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, server+"/api/blobs", f)
 	if err != nil {
 		return err
 	}
-	req.ContentLength = info.Size()
+	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set(authorHeader, author.String())
 	resp, err := http.DefaultClient.Do(req)
@@ -105,16 +176,11 @@ func ensureUploaded(dir, server string, at attachment, author gitrepo.Signature,
 	}
 	defer resp.Body.Close()
 	var body struct {
-		SHA256 string `json:"sha256"`
-		Error  string `json:"error"`
+		Error string `json:"error"`
 	}
 	json.NewDecoder(resp.Body).Decode(&body) // the status decides; the body explains
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("upload attachment %q: %s: %s; nothing was pushed", at.name, resp.Status, body.Error)
-	}
-	if body.SHA256 != at.sha {
-		return fmt.Errorf("attachment %q: %s holds content with hash %s, not %s; nothing was pushed",
-			at.name, localBlob(dir, at.sha), body.SHA256, at.sha)
 	}
 	fmt.Fprintf(log, "uploaded attachment %q (%s)\n", at.name, at.sha)
 	return nil
