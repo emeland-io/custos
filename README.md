@@ -14,7 +14,9 @@ The design is in
 This version implements the first phase (file formats, validation, Git over
 HTTP and the command line) and the start of the second: workspaces are
 created pinned to the catalog, and pushes to a workspace are checked against
-that catalog. Distributing catalog updates to workspaces, the REST API,
+that catalog. Answers can be written through a REST API, attachments are
+kept in a blob store on the server, and `custos clone` / `custos push` move
+them along with the Git history. Distributing catalog updates to workspaces,
 processors and the web UI follow.
 
 ## Catalog
@@ -139,6 +141,9 @@ custos workspace create --author "Jane Doe <jane@example.org>" WORKSPACE-UUID
                                                          # create a workspace pinned to the catalog
 custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
                                                          # serve the repositories over HTTP
+custos clone URL DIR                                     # git clone, then download the attachments
+custos push [--dir DIR] [--author "NAME <EMAIL>"] [REMOTE [GIT-PUSH-ARGS...]]
+                                                         # upload attachments, then git push
 ```
 
 `workspace create` and `serve` need `--data-dir` or `CUSTOS_DATA_DIR`.
@@ -197,6 +202,83 @@ example after an edit on disk, and serves them anyway.
 
 Flags win over environment variables. Run the built binary rather than
 `go run`: the repositories' hooks call the binary that started the server.
+
+## REST API
+
+The server answers JSON below `/api`. Every request that changes something
+names its author in the header `X-Custos-Author: Name <email>`; that person
+becomes the author of the commit, `custos-bot` its committer. There is no
+authentication yet (see Running).
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/workspaces` | workspaces with their pinned catalog commit and frozen flag |
+| `POST /api/workspaces` | create a workspace pinned to the catalog's `main`; body `{"id": "<uuid>"}`, or none for a new id |
+| `GET /api/workspaces/{id}/status` | every task with its state (`unanswered`, `answered`, `pending-update`), its answer and the answers in effect |
+| `GET /api/workspaces/{id}/book` | the book as Markdown |
+| `GET /api/workspaces/{id}/answers/{task}` | the answer to a task |
+| `PUT /api/workspaces/{id}/answers/{task}` | write the answer, as one commit on `main` |
+| `POST /api/workspaces/{id}/answers/{task}/still-valid` | keep the answer for the task's current version |
+| `POST /api/blobs` | upload an attachment (raw body, at most 1 GiB); returns `{"sha256", "size"}` |
+| `GET /api/blobs/{sha256}` | download an attachment |
+| `GET /api/catalog` | groups and current task versions of the catalog's `main` |
+| `GET /api/catalog/tasks/{id}` | all versions of a task |
+
+An answer is written for the task's current version unless `task_version`
+names another one. Markdown answers use `body`, all other types `value`:
+
+```sh
+curl -X PUT -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+  -d '{"value": "built by the release pipeline"}' \
+  http://127.0.0.1:8080/api/workspaces/<workspace-uuid>/answers/<task-uuid>
+```
+
+Attachments are uploaded first and then listed in the answer as
+`"attachments": [{"name": "scan.pdf", "sha256": "<hash>", "media_type": "application/pdf"}]`.
+Answers show `"available": false` for an attachment whose file the server
+does not have.
+
+Errors come as `{"error": "...", "problems": [{"path", "rule", "message"}]}`
+with 400 for a malformed request, 401 without a valid `X-Custos-Author`, 404
+for unknown workspaces, tasks and blobs, 409 when the workspace already
+exists or `main` moved meanwhile, 413 for oversized bodies, and 422 when the
+answer breaks a rule, the same rules as for a push.
+
+## Attachments, clone and push
+
+Attachments are stored on the server by their SHA-256 hash, outside Git, in
+`<data-dir>/blobs`. A plain `git clone` does not include them;
+`custos clone` does:
+
+```sh
+custos clone http://127.0.0.1:8080/git/workspaces/<workspace-uuid>.git ws
+```
+
+It downloads the attachments of the answers on the checked-out branch into
+`ws/.custos/blobs/sha256/`, which Git ignores, and warns about attachments
+the server does not have.
+
+To add an attachment in a checkout, copy the file there under its hash and
+reference it in the answer:
+
+```sh
+cd ws
+sha=$(shasum -a 256 scan.pdf | cut -d' ' -f1)
+mkdir -p .custos/blobs/sha256 && cp scan.pdf .custos/blobs/sha256/$sha
+# add to answers/<task-uuid>.md:
+#   attachments:
+#     - name: scan.pdf
+#       sha256: <the hash>
+#       media_type: application/pdf
+git commit -am "Attach the scan"
+custos push
+```
+
+`custos push` uploads the attachments referenced in the commits the remote
+does not have yet, then runs `git push`. It pushes nothing when an attachment
+is neither in `.custos/blobs/sha256/` nor on the server. Uploads are made in
+the name of `--author`, `CUSTOS_AUTHOR`, or else the checkout's
+`user.name` and `user.email`.
 
 ## Container image
 
