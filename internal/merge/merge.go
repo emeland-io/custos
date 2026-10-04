@@ -131,11 +131,17 @@ type plan struct {
 	used      map[string]bool  // paths whose resolution was applied
 }
 
-// planMerge settles every path git could not merge, by its resolution or
-// as an open conflict.
+// planMerge settles custos.yaml field by field and every other path git
+// could not merge, by its resolution or as an open conflict.
 func planMerge(st *store.Store, repo *gitrepo.Repo, base, ours, theirs string, mt *gitrepo.MergeTreeResult, res map[string]Resolution) (*plan, error) {
 	p := &plan{used: map[string]bool{}}
+	if err := p.config(st, repo, base, ours, theirs, mt, res); err != nil {
+		return nil, err
+	}
 	for _, c := range mt.Conflicts {
+		if c.Path == configPath {
+			continue // settled by p.config
+		}
 		if err := p.settle(c.Path, c.Ours, c.Theirs, res); err != nil {
 			return nil, err
 		}
