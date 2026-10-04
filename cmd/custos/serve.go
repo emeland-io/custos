@@ -115,6 +115,7 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 		return nil, err
 	}
 	srv := server.New(st)
+	startDistribution(st, a, srv, stderr)
 	srv.WithAPI(a.Handler())
 	return srv, nil
 }
