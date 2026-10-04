@@ -1,6 +1,8 @@
 package distribute
 
 import (
+	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/gittest"
+	"github.com/emeland-io/custos/internal/store"
 )
 
 func TestReconcileMovesPinOfUnfrozenWorkspace(t *testing.T) {
@@ -177,6 +180,92 @@ func TestConcurrentReconciles(t *testing.T) {
 	}
 	if b := pinBranches(t, wsRepo(t, st, wsB)); !slices.Equal(b, []string{"custos/pin/" + c3}) {
 		t.Errorf("branches %v", b)
+	}
+}
+
+// TestReconcileWorkspaceMovesOnlyOneWorkspace checks that ReconcileWorkspace
+// brings one workspace in line with the catalog's main without touching the
+// others, so a workspace push can reconcile itself without waiting for the
+// next catalog push.
+func TestReconcileWorkspaceMovesOnlyOneWorkspace(t *testing.T) {
+	st := newStore(t)
+	commitCatalog(t, st, fixture.Catalog())
+	createWorkspace(t, st, wsA)
+	createWorkspace(t, st, wsB)
+	c2 := newTaskAVersion(t, st, "1.2.0", "1.1.0")
+
+	if err := ReconcileWorkspace(st, wsA); err != nil {
+		t.Fatal(err)
+	}
+	if c := configAt(t, wsRepo(t, st, wsA), "refs/heads/main"); c.Catalog.Commit != c2 {
+		t.Errorf("wsA pin %s, want %s", c.Catalog.Commit, c2)
+	}
+	if c := configAt(t, wsRepo(t, st, wsB), "refs/heads/main"); c.Catalog.Commit == c2 {
+		t.Errorf("ReconcileWorkspace(wsA) also moved wsB's pin")
+	}
+}
+
+// TestReconcileWorkspaceNoCatalogYet checks that ReconcileWorkspace does
+// nothing, without error, when the catalog has no main branch yet.
+func TestReconcileWorkspaceNoCatalogYet(t *testing.T) {
+	st := newStore(t)
+	if err := ReconcileWorkspace(st, wsA); err != nil {
+		t.Fatalf("empty catalog: %v", err)
+	}
+}
+
+// TestRetryConflictRetries checks that retryConflict calls fn again while it
+// fails with store.ErrConflict, so the loser of a pin move's compare-and-swap
+// against a concurrent workspace push gets another attempt (ruling 2.3)
+// instead of being dropped.
+func TestRetryConflictRetries(t *testing.T) {
+	calls := 0
+	err := retryConflict(func() error {
+		calls++
+		if calls < maxConflictRetries {
+			return fmt.Errorf("lost the race: %w", store.ErrConflict)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != maxConflictRetries {
+		t.Errorf("calls = %d, want %d", calls, maxConflictRetries)
+	}
+}
+
+// TestRetryConflictGivesUpAfterMaxAttempts checks that retryConflict stops
+// retrying and returns the last error once the bounded number of attempts is
+// used up.
+func TestRetryConflictGivesUpAfterMaxAttempts(t *testing.T) {
+	calls := 0
+	err := retryConflict(func() error {
+		calls++
+		return store.ErrConflict
+	})
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("err %v, want store.ErrConflict", err)
+	}
+	if calls != maxConflictRetries {
+		t.Errorf("calls = %d, want %d", calls, maxConflictRetries)
+	}
+}
+
+// TestRetryConflictStopsOnOtherErrors checks that retryConflict does not
+// retry an error that is not store.ErrConflict.
+func TestRetryConflictStopsOnOtherErrors(t *testing.T) {
+	calls := 0
+	want := errors.New("boom")
+	err := retryConflict(func() error {
+		calls++
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("err %v, want %v", err, want)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
 	}
 }
 

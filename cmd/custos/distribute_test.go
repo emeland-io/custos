@@ -131,6 +131,85 @@ func TestCatalogPushIsDistributed(t *testing.T) {
 	}
 }
 
+// TestWorkspacePushIsDistributed checks that a push to a workspace's main
+// that unfreezes it reconciles that workspace right away, through
+// OnWorkspacePush, without waiting for the next catalog push: the pin moves
+// to the catalog's current main and the proposal opened for it is pruned.
+func TestWorkspacePushIsDistributed(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "custos")
+	if out, err := exec.Command("go", "build", "-o", bin, "github.com/emeland-io/custos/cmd/custos").CombinedOutput(); err != nil {
+		t.Fatalf("build custos: %v\n%s", err, out)
+	}
+	var log lockedBuffer
+	st, srv := wired(t, bin, &log)
+	h, err := srv.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	catalogRemote := ts.URL + "/git/catalog.git"
+
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", "--quiet", catalogRemote, "main")
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	if err := distribute.Freeze(st, fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	c1 := pinOf(t, st, fixture.WorkspaceID)
+
+	c2 := gittest.Commit(t, work, map[string]string{
+		fixture.TaskPath(fixture.TaskA, "1.2.0"): fixture.TaskFile(fixture.TaskA, "1.2.0", fixture.TaskA+"@1.1.0"),
+	})
+	gittest.Run(t, work, "push", "--quiet", catalogRemote, "main")
+
+	// Wait for the catalog push's reconcile to open the proposal.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ps, err := distribute.Proposals(st, fixture.WorkspaceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ps) == 1 && ps[0].Branch == "custos/pin/"+c2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("proposal for %s was not opened; proposals %+v; log:\n%s", c2, ps, log.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// An engineer unfreezes by pushing custos.yaml directly, not through the
+	// API, and with no further catalog push: ReconcileWorkspace must still
+	// move the pin and prune the now-unneeded proposal.
+	clone := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", ts.URL+"/git/workspaces/"+fixture.WorkspaceID+".git", clone)
+	gittest.Commit(t, clone, map[string]string{"custos.yaml": fixture.Config(fixture.WorkspaceID, c1)})
+	gittest.Run(t, clone, "push", "--quiet", "origin", "main")
+
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		ps, err := distribute.Proposals(st, fixture.WorkspaceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pinOf(t, st, fixture.WorkspaceID) == c2 && len(ps) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workspace push was not distributed; pin %s, proposals %+v; log:\n%s",
+				pinOf(t, st, fixture.WorkspaceID), ps, log.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s := log.String(); s != "" {
+		t.Errorf("unexpected log:\n%s", s)
+	}
+}
+
 func TestStartDistributionCatchesUp(t *testing.T) {
 	// Catalog commits made while the server was down are distributed when it
 	// starts (ruling 2.5); a broken workspace is logged and the others are

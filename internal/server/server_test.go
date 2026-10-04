@@ -216,6 +216,62 @@ func TestOnCatalogPushWithoutDotGit(t *testing.T) {
 	}
 }
 
+// TestOnWorkspacePush checks that OnWorkspacePush fires, with the
+// workspace's id, after a push to its repository completes, accepted or
+// rejected, mirroring TestOnCatalogPush; plan 2c depends on this callback.
+func TestOnWorkspacePush(t *testing.T) {
+	st, srv, url := start(t)
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	srv.OnWorkspacePush(func(id string) { calls = append(calls, id) })
+
+	clone := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", url+"/git/workspaces/"+fixture.WorkspaceID+".git", clone)
+	gittest.Commit(t, clone, map[string]string{"answers/" + fixture.TaskA + ".md": fixture.AnswerFile})
+	gittest.Run(t, clone, "push", "origin", "main")
+	if len(calls) != 1 || calls[0] != fixture.WorkspaceID {
+		t.Fatalf("calls %v after one push, want [%s]", calls, fixture.WorkspaceID)
+	}
+	gittest.Run(t, t.TempDir(), "ls-remote", url+"/git/workspaces/"+fixture.WorkspaceID+".git")
+	if len(calls) != 1 {
+		t.Errorf("calls %v after a fetch; want still 1", calls)
+	}
+
+	gittest.Commit(t, clone, map[string]string{"answers/bad.txt": "x"})
+	gittest.Try(clone, "push", "origin", "main")
+	if len(calls) != 2 || calls[1] != fixture.WorkspaceID {
+		t.Fatalf("calls %v after a rejected push; want a second call naming %s", calls, fixture.WorkspaceID)
+	}
+}
+
+// TestOnWorkspacePushWithoutDotGit checks that a push to
+// /git/workspaces/<id> (the alias git http-backend also serves alongside
+// /git/workspaces/<id>.git) still fires OnWorkspacePush.
+func TestOnWorkspacePushWithoutDotGit(t *testing.T) {
+	st, srv, url := start(t)
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", url+"/git/catalog.git", "main")
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	srv.OnWorkspacePush(func(id string) { calls = append(calls, id) })
+
+	clone := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", url+"/git/workspaces/"+fixture.WorkspaceID, clone)
+	gittest.Commit(t, clone, map[string]string{"answers/" + fixture.TaskA + ".md": fixture.AnswerFile})
+	gittest.Run(t, clone, "push", url+"/git/workspaces/"+fixture.WorkspaceID, "main")
+	if len(calls) != 1 || calls[0] != fixture.WorkspaceID {
+		t.Fatalf("calls %v after one push to the alias without .git, want [%s]", calls, fixture.WorkspaceID)
+	}
+}
+
 func TestWithContentLengthLimitsBody(t *testing.T) {
 	old := maxRequestBytes
 	maxRequestBytes = 16

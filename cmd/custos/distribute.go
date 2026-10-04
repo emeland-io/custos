@@ -11,10 +11,12 @@ import (
 )
 
 // startDistribution adds the freeze and pin proposal endpoints to a,
-// distributes catalog changes after every push to catalog.git, and
-// distributes once now to catch up with commits made while the server was
-// down (ruling 2.5). Call it before a.Handler() and srv.Handler(). Failures
-// are written to stderr and never stop the server (spec §7).
+// distributes catalog changes after every push to catalog.git or to a
+// workspace (a pin move, a freeze/unfreeze or a proposal merge made by
+// plain Git need not wait for the next catalog push), and distributes once
+// now to catch up with commits made while the server was down (ruling 2.5).
+// Call it before a.Handler() and srv.Handler(). Failures are written to
+// stderr and never stop the server (spec §7).
 func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr io.Writer) {
 	distribute.Register(a, st)
 	reconcile := func() {
@@ -23,5 +25,10 @@ func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr i
 		}
 	}
 	srv.OnCatalogPush(reconcile)
+	srv.OnWorkspacePush(func(id string) {
+		if err := distribute.ReconcileWorkspace(st, id); err != nil {
+			fmt.Fprintf(stderr, "custos serve: distributing workspace %s: %v\n", id, err)
+		}
+	})
 	reconcile()
 }

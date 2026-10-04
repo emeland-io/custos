@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sync"
 
@@ -24,14 +25,21 @@ var catalogPushPaths = [2]string{
 	"/git/catalog/git-receive-pack",
 }
 
+// workspacePushPath matches the requests that carry a push to a workspace,
+// git http-backend serves both the repository's real name and the alias
+// without ".git", the same way it does for the catalog. The captured group
+// is the workspace id.
+var workspacePushPath = regexp.MustCompile(`^/git/workspaces/([^/]+?)(?:\.git)?/git-receive-pack$`)
+
 // Server serves the repositories of a store. Repository layout, hooks and
 // writes belong to the store (ruling 2.17).
 type Server struct {
 	st  *store.Store
 	api http.Handler // mounted at /api/ when set
 
-	mu            sync.Mutex
-	onCatalogPush []func()
+	mu              sync.Mutex
+	onCatalogPush   []func()
+	onWorkspacePush []func(id string)
 }
 
 // New returns a server for st.
@@ -54,6 +62,17 @@ func (s *Server) OnCatalogPush(f func()) {
 	s.onCatalogPush = append(s.onCatalogPush, f)
 }
 
+// OnWorkspacePush registers f to be called, with the workspace's id, after
+// each request to push a workspace (/git/workspaces/<id>.git/git-receive-pack,
+// or the /git/workspaces/<id> alias) completes, whether the push was
+// accepted or not. f runs before the response ends, so the pusher waits
+// for it.
+func (s *Server) OnWorkspacePush(f func(id string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onWorkspacePush = append(s.onWorkspacePush, f)
+}
+
 // Handler serves the repositories below /git through git http-backend, and
 // GET /healthz.
 func (s *Server) Handler() (http.Handler, error) {
@@ -68,7 +87,7 @@ func (s *Server) Handler() (http.Handler, error) {
 		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Join(s.st.DataDir(), "repos"), "GIT_HTTP_EXPORT_ALL=1"},
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/git/", withContentLength(s.notifyCatalogPush(backend)))
+	mux.Handle("/git/", withContentLength(s.notifyPush(backend)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -78,17 +97,32 @@ func (s *Server) Handler() (http.Handler, error) {
 	return mux, nil
 }
 
-func (s *Server) notifyCatalogPush(h http.Handler) http.Handler {
+// notifyPush wraps h so that, once it has served the request, a push to the
+// catalog fires every OnCatalogPush callback and a push to a workspace fires
+// every OnWorkspacePush callback with that workspace's id.
+func (s *Server) notifyPush(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
-		if r.Method != http.MethodPost || !slices.Contains(catalogPushPaths[:], r.URL.Path) {
+		if r.Method != http.MethodPost {
 			return
 		}
-		s.mu.Lock()
-		fs := append([]func(){}, s.onCatalogPush...)
-		s.mu.Unlock()
-		for _, f := range fs {
-			f()
+		if slices.Contains(catalogPushPaths[:], r.URL.Path) {
+			s.mu.Lock()
+			fs := append([]func(){}, s.onCatalogPush...)
+			s.mu.Unlock()
+			for _, f := range fs {
+				f()
+			}
+			return
+		}
+		if m := workspacePushPath.FindStringSubmatch(r.URL.Path); m != nil {
+			id := m[1]
+			s.mu.Lock()
+			fs := append([]func(string){}, s.onWorkspacePush...)
+			s.mu.Unlock()
+			for _, f := range fs {
+				f(id)
+			}
 		}
 	})
 }

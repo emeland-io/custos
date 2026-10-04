@@ -137,8 +137,10 @@ these three rules are checked on push.
 ## Catalog updates and freezing
 
 When the catalog's `main` advances, custos brings every workspace up to
-date. It does so right after each push to `catalog.git` and once when the
-server starts.
+date. It does so right after each push to `catalog.git`, right after each
+push to a workspace (so a `frozen: false` pushed by hand, or a proposal
+merged with plain Git, takes effect at once instead of waiting for the next
+catalog push), and once when the server starts.
 
 - An **unfrozen** workspace gets a commit by `custos-bot` on its `main`
   that moves `catalog.commit` to the new catalog commit. Existing answers
@@ -179,8 +181,9 @@ whether groups (`groups_changed`) or processors and bindings
 header.
 
 A proposal is a normal branch, so it can also be merged with Git: fetch
-it, merge it into `main` and push. custos deletes the branch once the pin
-on `main` has reached the catalog's `main`.
+it, merge it into `main` and push. custos reconciles the workspace right
+after that push and deletes the branch once the pin on `main` has reached
+the catalog's `main`.
 
 custos rewrites `custos.yaml` when it moves a pin or freezes a workspace;
 comments in that file are not kept. A workspace whose `custos.yaml` cannot

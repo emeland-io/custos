@@ -55,6 +55,25 @@ func Reconcile(st *store.Store) error {
 	return errors.Join(errs...)
 }
 
+// ReconcileWorkspace brings one workspace in line with the catalog's main,
+// the same way Reconcile does for every workspace. Used after a push to
+// that workspace (for example one that unfreezes it, or merges a pin
+// proposal by plain Git), since the catalog's main may not have moved and
+// so the next catalog push, which would otherwise reconcile it, might never
+// come. Does nothing when the catalog has no main yet.
+func ReconcileWorkspace(st *store.Store, id string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	head, ok, err := st.CatalogRepo().ResolveRef(mainRef)
+	if err != nil {
+		return fmt.Errorf("catalog: %w", err)
+	}
+	if !ok {
+		return nil // nothing published yet
+	}
+	return reconcile(st, id, head)
+}
+
 // reconcile brings one workspace in line with catalog commit head. The
 // caller holds mu.
 func reconcile(st *store.Store, id, head string) error {
@@ -89,16 +108,37 @@ func reconcile(st *store.Store, id, head string) error {
 	}
 }
 
+// maxConflictRetries bounds the attempts retryConflict makes.
+const maxConflictRetries = 3
+
+// retryConflict calls fn, retrying while it fails with store.ErrConflict, up
+// to maxConflictRetries attempts in total. mu is not taken by pushes (see
+// its doc comment), so a pin move or a proposal commit can lose its
+// compare-and-swap to a concurrent push to the same workspace; ruling 2.3
+// requires that the loser retry instead of being dropped. fn must re-read
+// the state it needs on every call.
+func retryConflict(fn func() error) error {
+	var err error
+	for range maxConflictRetries {
+		if err = fn(); !errors.Is(err, store.ErrConflict) {
+			return err
+		}
+	}
+	return err
+}
+
 // movePin commits the pin head on main, authored by custos-bot.
 func movePin(st *store.Store, id, head string) error {
-	_, err := st.UpdateWorkspace(id, mainRef, gitrepo.Bot, "Pin catalog commit "+head, func(tree fs.FS) ([]gitrepo.Change, error) {
-		return editConfig(tree, func(c *workspace.Config) {
-			if !c.Frozen { // a push may have frozen the workspace since main was read
-				c.Catalog.Commit = head
-			}
+	return retryConflict(func() error {
+		_, err := st.UpdateWorkspace(id, mainRef, gitrepo.Bot, "Pin catalog commit "+head, func(tree fs.FS) ([]gitrepo.Change, error) {
+			return editConfig(tree, func(c *workspace.Config) {
+				if !c.Frozen { // a push may have frozen the workspace since main was read
+					c.Catalog.Commit = head
+				}
+			})
 		})
+		return err
 	})
-	return err
 }
 
 // propose makes sure branch custos/pin/<head> exists, unless the proposal
@@ -106,16 +146,18 @@ func movePin(st *store.Store, id, head string) error {
 // custos-bot that changes the pin. An existing branch is kept as it is,
 // even when main has moved on; Accept handles that.
 func propose(st *store.Store, id string, repo *gitrepo.Repo, head string) error {
-	ref := pinRefPrefix + head
-	for _, existing := range []string{ref, rejectedRefPrefix + head} {
-		if _, ok, err := repo.ResolveRef(existing); err != nil || ok {
-			return err
+	return retryConflict(func() error {
+		ref := pinRefPrefix + head
+		for _, existing := range []string{ref, rejectedRefPrefix + head} {
+			if _, ok, err := repo.ResolveRef(existing); err != nil || ok {
+				return err
+			}
 		}
-	}
-	_, err := st.UpdateWorkspace(id, ref, gitrepo.Bot, "Propose catalog commit "+head, func(tree fs.FS) ([]gitrepo.Change, error) {
-		return editConfig(tree, func(c *workspace.Config) { c.Catalog.Commit = head })
+		_, err := st.UpdateWorkspace(id, ref, gitrepo.Bot, "Propose catalog commit "+head, func(tree fs.FS) ([]gitrepo.Change, error) {
+			return editConfig(tree, func(c *workspace.Config) { c.Catalog.Commit = head })
+		})
+		return err
 	})
-	return err
 }
 
 // prune deletes the pin proposal branches and rejection marks other than
