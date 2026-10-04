@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/emeland-io/custos/internal/distribute"
 	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
 	"github.com/emeland-io/custos/internal/store"
@@ -115,7 +116,11 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 	if err != nil {
 		return nil, err
 	}
-	merge.Register(a, st)
+	merge.Register(a, st, func(id string) {
+		if err := distribute.ReconcileWorkspace(st, id); err != nil {
+			fmt.Fprintf(stderr, "custos serve: workspace %s: %v\n", id, err)
+		}
+	})
 	srv := server.New(st)
 	startDistribution(st, a, srv, stderr)
 	srv.WithAPI(a.Handler())

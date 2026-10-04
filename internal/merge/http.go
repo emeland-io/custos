@@ -19,9 +19,18 @@ const maxBody = 64 << 20
 
 // Register adds the fork, merge and branch endpoints (spec §4.4) to the
 // REST API. Call it before a.Handler().
-func Register(a *api.API, st *store.Store) {
-	a.Handle("POST /api/workspaces/{id}/fork", func(w http.ResponseWriter, r *http.Request) { handleFork(st, w, r) })
-	a.Handle("POST /api/workspaces/{id}/merge", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, w, r) })
+//
+// onMainMoved, which may be nil, is called synchronously, with no store
+// lock held, after a successful merge that moved the target's main (with
+// the target workspace id) and after a successful fork (with the new
+// workspace's id), before the response is written. It is not called for a
+// merge that answers 409 with conflicts, a merge that leaves main where it
+// was (the branch was already merged), or a failed fork. The caller uses it
+// to reconcile the workspace with the catalog right away, since such a
+// move does not go through a Git push (ruling 2.20).
+func Register(a *api.API, st *store.Store, onMainMoved func(id string)) {
+	a.Handle("POST /api/workspaces/{id}/fork", func(w http.ResponseWriter, r *http.Request) { handleFork(st, onMainMoved, w, r) })
+	a.Handle("POST /api/workspaces/{id}/merge", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, onMainMoved, w, r) })
 	a.Handle("GET /api/workspaces/{id}/branches", func(w http.ResponseWriter, r *http.Request) { handleBranches(st, w, r) })
 }
 
@@ -46,7 +55,7 @@ type resolutionJSON struct {
 	Content []byte `json:"content"` // base64
 }
 
-func handleFork(st *store.Store, w http.ResponseWriter, r *http.Request) {
+func handleFork(st *store.Store, onMainMoved func(id string), w http.ResponseWriter, r *http.Request) {
 	author, err := api.Author(r)
 	if err != nil {
 		api.WriteJSON(w, http.StatusUnauthorized, errorBody{err.Error()})
@@ -65,10 +74,13 @@ func handleFork(st *store.Store, w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if onMainMoved != nil {
+		onMainMoved(body.ID)
+	}
 	api.WriteJSON(w, http.StatusCreated, map[string]string{"id": body.ID})
 }
 
-func handleMerge(st *store.Store, w http.ResponseWriter, r *http.Request) {
+func handleMerge(st *store.Store, onMainMoved func(id string), w http.ResponseWriter, r *http.Request) {
 	author, err := api.Author(r)
 	if err != nil {
 		api.WriteJSON(w, http.StatusUnauthorized, errorBody{err.Error()})
@@ -85,7 +97,9 @@ func handleMerge(st *store.Store, w http.ResponseWriter, r *http.Request) {
 	for path, rj := range body.Resolutions {
 		res[path] = Resolution{Side: rj.Side, Content: rj.Content}
 	}
-	result, err := Merge(st, r.PathValue("id"), body.Branch, author, res)
+	id := r.PathValue("id")
+	before := mainBefore(st, id)
+	result, err := Merge(st, id, body.Branch, author, res)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -98,7 +112,31 @@ func handleMerge(st *store.Store, w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusConflict, cb)
 		return
 	}
+	if onMainMoved != nil && result.Commit != before {
+		onMainMoved(id)
+	}
 	api.WriteJSON(w, http.StatusOK, map[string]string{"commit": result.Commit})
+}
+
+// mainBefore returns the workspace's current main commit, or "" when it has
+// none yet or cannot be read. handleMerge calls it before Merge, only to
+// tell apart a merge that moves main from one that finds the branch already
+// merged (Merge returns main's unchanged commit for the latter, so
+// comparing against the commit read here is enough; Merge itself re-reads
+// main under its own compare-and-swap, so a concurrent change between the
+// two reads only risks an extra, harmless call to onMainMoved, never a
+// missed one). "" never equals a real commit, so an error or a missing main
+// here, which Merge would then also fail on, cannot suppress a call either.
+func mainBefore(st *store.Store, id string) string {
+	repo, err := st.WorkspaceRepo(id)
+	if err != nil {
+		return ""
+	}
+	commit, ok, err := repo.ResolveRef(mainRef)
+	if err != nil || !ok {
+		return ""
+	}
+	return commit
 }
 
 func handleBranches(st *store.Store, w http.ResponseWriter, r *http.Request) {

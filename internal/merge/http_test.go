@@ -20,12 +20,18 @@ const aliceHeader = "Alice Example <alice@example.org>"
 
 func handler(t *testing.T, e *env) http.Handler {
 	t.Helper()
+	return handlerWithCallback(t, e, nil)
+}
+
+// handlerWithCallback is handler, but Register is given onMainMoved.
+func handlerWithCallback(t *testing.T, e *env, onMainMoved func(id string)) http.Handler {
+	t.Helper()
 	bl, err := blobs.Open(filepath.Join(e.st.DataDir(), "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := api.New(e.st, bl)
-	Register(a, e.st)
+	Register(a, e.st, onMainMoved)
 	return a.Handler()
 }
 
@@ -177,5 +183,60 @@ func TestBranchesEndpoint(t *testing.T) {
 	}
 	if rec := call(h, "GET", "/api/workspaces/"+unknownTask+"/branches", "", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown workspace: %d, want 404", rec.Code)
+	}
+}
+
+// TestOnMainMovedCallback checks that Register's onMainMoved callback fires
+// once with the target id after a merge that moves main, once with the new
+// id after a successful fork, and not at all for a merge that answers 409
+// with conflicts, a merge that is a no-op (branch already merged), or a
+// failed fork.
+func TestOnMainMovedCallback(t *testing.T) {
+	e := setup(t)
+	ours, theirs := textAnswer(fixture.TaskA, "1.1.0", "ours"), textAnswer(fixture.TaskA, "1.1.0", "theirs")
+	diverge(t, e,
+		map[string]string{answerA: textAnswer(fixture.TaskA, "1.1.0", "base")},
+		map[string]string{answerA: ours},
+		map[string]string{answerA: theirs})
+
+	var calls []string
+	h := handlerWithCallback(t, e, func(id string) { calls = append(calls, id) })
+	mergePath := "/api/workspaces/" + ws + "/merge"
+
+	// Conflicting merge: 409, no callback.
+	rec := call(h, "POST", mergePath, aliceHeader, `{"branch":"what-if"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("merge with conflicts: %d %s", rec.Code, rec.Body)
+	}
+
+	// Resolve the conflict: main moves, the callback fires once with ws.
+	resolved := textAnswer(fixture.TaskA, "1.1.0", "both")
+	body := `{"branch":"what-if","resolutions":{"` + answerA + `":{"side":"content","content":"` +
+		base64.StdEncoding.EncodeToString([]byte(resolved)) + `"}}}`
+	rec = call(h, "POST", mergePath, aliceHeader, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge with resolution: %d %s", rec.Code, rec.Body)
+	}
+
+	// Merging the already-merged branch again is a no-op: no extra callback.
+	rec = call(h, "POST", mergePath, aliceHeader, `{"branch":"what-if"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge again: %d %s", rec.Code, rec.Body)
+	}
+
+	// Failed fork (no author): no callback.
+	rec = call(h, "POST", "/api/workspaces/"+ws+"/fork", "", `{}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("fork without author: %d %s", rec.Code, rec.Body)
+	}
+
+	// Successful fork: the callback fires once with the new id.
+	rec = call(h, "POST", "/api/workspaces/"+ws+"/fork", aliceHeader, `{"id":"`+forkID+`"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fork: %d %s", rec.Code, rec.Body)
+	}
+
+	if want := []string{ws, forkID}; !slices.Equal(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
 	}
 }
