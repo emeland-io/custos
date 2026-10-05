@@ -95,7 +95,18 @@ func New(keysDir string) (*Verifier, error) {
 // attest.Unwrap(content).Payload, as for attest.Unverified: a document on
 // which Unwrap and the library disagree is failed, whatever the
 // signatures say.
-func (v *Verifier) Verify(content []byte) attest.Result {
+func (v *Verifier) Verify(content []byte) (result attest.Result) {
+	// The carabiner-dev library, sigstore-go and protojson are not known to
+	// panic on malformed input, but nothing guarantees it either. Verify
+	// runs in worker goroutines (plan 3d), where an unrecovered panic would
+	// kill the whole serve process rather than fail one request, so guard
+	// against it here instead of relying solely on the dependencies' own
+	// care.
+	defer func() {
+		if recover() != nil {
+			result = attest.Result{Status: attest.StatusFailed, Payload: attest.Unwrap(content).Payload}
+		}
+	}()
 	u := attest.Unwrap(content)
 	res := attest.Result{Status: attest.StatusUnsigned, Payload: u.Payload}
 	// What Unwrap sees decides only between unsigned and failed when the

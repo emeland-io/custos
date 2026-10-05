@@ -86,11 +86,29 @@ for requirements on predicate content. It is not used yet.
 
 The phase-0 code was removed in `244f9de`. Phase 3 verifies the documents
 that processors output and uses only `github.com/carabiner-dev/signer`
-(v0.6.2): `Verifier.VerifyStatementBytes` for DSSE envelopes and Sigstore
-bundles, `key.Parser` for the trusted keys. The interface is now
+(v0.6.2): `signer.ParseArtifact` parses the content once into the
+library's own artifact type, and `(*signer.Verifier).VerifyStatement` is
+then called on that same parsed artifact — not `VerifyStatementBytes`,
+which verifies from raw bytes but does not hand back the parsed envelope
+it checked. `key.Parser` loads the trusted keys. The interface is now
 `attest.Verifier` with `Verify(content) Result`; requirement checks against
 predicate types, subjects and identities are gone, since custos no longer
-has Nodes. The library's "unverifiable" is reported as `failed`. Tests:
-`internal/attest/carabiner/carabiner_test.go`, which signs DSSE envelopes
-with the standard library and keeps the bnd v0.4.6 bundle fixture. Rulings:
-§11.3 of the design spec.
+has Nodes. The library's "unverifiable" is reported as `failed`.
+
+The verified payload comes only from the artifact the library itself
+checked; a second, independent parser must never supply it. An earlier
+round of this plan took `Result.Payload` from custos's own separate parse
+of `content`, which let a payload the library never saw (reached through
+ambiguous or duplicate JSON keys) be reported as `verified` under the
+signature covering a different payload — a signature-verification bypass.
+The fix was to derive `Payload` from the DSSE envelope held by the very
+`signer.SignedArtifact` that `VerifyStatement` checked (its
+`EnvelopeArtifact.Envelope` or `BundleArtifact.Bundle`), which is why
+`ParseArtifact`/`VerifyStatement` replaced `VerifyStatementBytes` here.
+`TestVerifyNeverPairsVerifiedWithAnotherPayload` in
+`internal/attest/carabiner/carabiner_test.go` is the regression test for
+this rule.
+
+Tests: `internal/attest/carabiner/carabiner_test.go`, which signs DSSE
+envelopes with the standard library and keeps the bnd v0.4.6 bundle
+fixture. Rulings: §11.3 of the design spec.
