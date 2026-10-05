@@ -87,6 +87,17 @@ func (v *Verifier) Verify(content []byte) attest.Result {
 	if u.Kind == attest.KindBare || u.Signatures == 0 {
 		return res
 	}
+	if !u.PayloadIsStatement {
+		// The envelope is signed, but its payload field could not be
+		// extracted as a JSON statement (malformed base64, or bytes
+		// that are not JSON at all). Res.Payload would otherwise fall
+		// back to the canonical JSON of the whole envelope — bytes
+		// nobody signed in that exact form — paired with whatever the
+		// signature check below says; that pairing must never be
+		// reported as verified.
+		res.Status = attest.StatusFailed
+		return res
+	}
 	opts := []options.VerificationOptFunc{
 		options.WithRekorVerification(false),
 		// custos records who signed; it does not require particular

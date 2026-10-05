@@ -201,6 +201,15 @@ func TestVerifyDSSE(t *testing.T) {
 		{"signature that is not base64", editJSON(t, signed, func(m map[string]any) {
 			m["signatures"] = []any{map[string]any{"sig": "%%%"}}
 		}), trusted, attest.StatusFailed, 0},
+		// Review Focus 5: a signed envelope whose payload field itself
+		// (not its signature) is malformed must fail, not verify under
+		// a fallback payload nobody signed in that exact form.
+		{"payload that is not base64", editJSON(t, signed, func(m map[string]any) {
+			m["payload"] = "%%%"
+		}), trusted, attest.StatusFailed, 0},
+		{"signed payload that is not JSON", editJSON(t, signed, func(m map[string]any) {
+			m["payload"] = base64.StdEncoding.EncodeToString([]byte("plain text"))
+		}), trusted, attest.StatusFailed, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newVerifier(t, tc.keys).Verify(tc.content)
@@ -214,6 +223,53 @@ func TestVerifyDSSE(t *testing.T) {
 				t.Errorf("payload %s, want %s", r.Payload, want)
 			}
 		})
+	}
+}
+
+// TestVerifyRejectsCaseVariantPayloadKey is a regression test for a
+// signature-verification bypass: a validly-signed DSSE envelope with a
+// second, differently-cased "Payload" key added (holding an entirely
+// different, forged statement) must never come back verified while
+// reporting the forged statement as Result.Payload. Before the fix,
+// attest.Unwrap decoded the envelope into a Go struct, whose field
+// matching falls back to being case-insensitive when no exact-case key
+// is present for a tag — and, critically, lets whichever of several
+// same-or-different-case keys appears last in the JSON object win. The
+// carabiner-dev signer library verifies the signature against the
+// original, exact-case "payload" field (so it legitimately reports
+// VERIFIED with the real signer's identity); Unwrap must agree with it on
+// which bytes that actually is.
+func TestVerifyRejectsCaseVariantPayloadKey(t *testing.T) {
+	ed := newKey(t, "ed25519")
+	real := statement(t, "artifact.tgz")
+	forged := statement(t, "forged-subject")
+	signed := sign(t, real, ed)
+	attack := editJSON(t, signed, func(m map[string]any) {
+		// A second key, differing only in case from the real "payload",
+		// holding a base64-encoded statement nobody signed.
+		m["Payload"] = base64.StdEncoding.EncodeToString(forged)
+	})
+
+	v := newVerifier(t, map[string]testKey{"ed.pub": ed})
+	r := v.Verify(attack)
+
+	forgedCanonical := canonical(t, forged)
+	if string(r.Payload) == forgedCanonical {
+		t.Fatalf("bypass: Verify reported the attacker's forged statement as Payload (status %q)", r.Status)
+	}
+	switch r.Status {
+	case attest.StatusVerified:
+		if want := canonical(t, real); string(r.Payload) != want {
+			t.Errorf("verified with payload %s, want the originally signed statement %s", r.Payload, want)
+		}
+		if len(r.Signers) == 0 {
+			t.Errorf("verified with no signers")
+		}
+	case attest.StatusFailed:
+		// Also an acceptable outcome: rejecting the ambiguous envelope
+		// outright.
+	default:
+		t.Errorf("status %q, want %q or %q", r.Status, attest.StatusVerified, attest.StatusFailed)
 	}
 }
 
