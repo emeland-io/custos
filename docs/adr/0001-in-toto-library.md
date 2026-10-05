@@ -81,3 +81,16 @@ replace it without changes elsewhere.
 
 AMPEL policy evaluation (`ampel/pkg/verifier`) is a possible later addition
 for requirements on predicate content. It is not used yet.
+
+## Use in phase 3 (2026-10-04)
+
+The phase-0 code was removed in `244f9de`. Phase 3 verifies the documents
+that processors output and uses only `github.com/carabiner-dev/signer`
+(v0.6.2): `Verifier.VerifyStatementBytes` for DSSE envelopes and Sigstore
+bundles, `key.Parser` for the trusted keys. The interface is now
+`attest.Verifier` with `Verify(content) Result`; requirement checks against
+predicate types, subjects and identities are gone, since custos no longer
+has Nodes. The library's "unverifiable" is reported as `failed`. Tests:
+`internal/attest/carabiner/carabiner_test.go`, which signs DSSE envelopes
+with the standard library and keeps the bnd v0.4.6 bundle fixture. Rulings:
+§11.3 of the design spec.
