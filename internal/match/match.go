@@ -111,6 +111,9 @@ func Plan(run Run, out *contract.Output) (*Changes, error) {
 	if err := p.tasks(out.Tasks); err != nil {
 		return nil, err
 	}
+	if err := p.documents(out.Documents); err != nil {
+		return nil, err
+	}
 	slices.SortFunc(p.items, CompareItems)
 	slices.SortStableFunc(p.files, func(a, b gitrepo.Change) int { return cmp.Compare(a.Path, b.Path) })
 	return &Changes{Items: p.items, Files: p.files}, nil
