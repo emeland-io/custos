@@ -4,6 +4,7 @@
 package carabiner
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,22 +81,35 @@ func New(keysDir string) (*Verifier, error) {
 // Verify implements attest.Verifier. Bare content and envelopes without
 // signatures are unsigned; an envelope or bundle whose signatures cannot
 // be verified for any reason (no matching trusted key, no trusted keys at
-// all, a modified payload, a malformed envelope) is failed.
+// all, a modified payload, a malformed envelope, a payload that is not
+// JSON) is failed.
+//
+// A verified Result's Payload is taken from the very artifact the signer
+// library parsed and checked the signatures of (signer.ParseArtifact,
+// then VerifyStatement on its result), never from a second parse of
+// content: the library routes and decodes JSON its own way (an
+// encoding/json probe that matches keys case-insensitively, the last
+// duplicate winning; protojson, which also accepts proto field names such
+// as dsse_envelope), and any second parser can be made to disagree with
+// it about which payload a document carries. Payload is still always
+// attest.Unwrap(content).Payload, as for attest.Unverified: a document on
+// which Unwrap and the library disagree is failed, whatever the
+// signatures say.
 func (v *Verifier) Verify(content []byte) attest.Result {
 	u := attest.Unwrap(content)
 	res := attest.Result{Status: attest.StatusUnsigned, Payload: u.Payload}
-	if u.Kind == attest.KindBare || u.Signatures == 0 {
-		return res
+	// What Unwrap sees decides only between unsigned and failed when the
+	// library cannot conclude, or concludes UNSIGNED; neither carries a
+	// trust claim.
+	notVerified := attest.StatusUnsigned
+	if u.Kind != attest.KindBare && u.Signatures > 0 {
+		notVerified = attest.StatusFailed
 	}
-	if !u.PayloadIsStatement {
-		// The envelope is signed, but its payload field could not be
-		// extracted as a JSON statement (malformed base64, or bytes
-		// that are not JSON at all). Res.Payload would otherwise fall
-		// back to the canonical JSON of the whole envelope — bytes
-		// nobody signed in that exact form — paired with whatever the
-		// signature check below says; that pairing must never be
-		// reported as verified.
-		res.Status = attest.StatusFailed
+
+	art, err := signer.ParseArtifact(content)
+	if err != nil {
+		// Not a DSSE envelope or Sigstore bundle as the library reads it.
+		res.Status = notVerified
 		return res
 	}
 	opts := []options.VerificationOptFunc{
@@ -107,25 +121,48 @@ func (v *Verifier) Verify(content []byte) attest.Result {
 	if len(v.keys) > 0 {
 		opts = append(opts, options.WithPublicKeys(v.keys...))
 	}
-	ver, err := sharedSigner().VerifyStatementBytes(content, opts...)
+	ver, err := sharedSigner().VerifyStatement(art, opts...)
 	if err != nil {
-		res.Status = attest.StatusFailed
+		res.Status = notVerified
 		return res
 	}
 	sig := ver.GetSignature()
 	switch sig.GetStatus() {
 	case api.VerificationStatus_VERIFIED:
-		res.Status = attest.StatusVerified
-		res.Signers = signers(sig.GetIdentities())
-		if len(res.Signers) == 0 {
+		payload, err := attest.Canonical(signedPayload(art))
+		ids := signers(sig.GetIdentities())
+		// A signed payload that is not JSON is not a statement; one that
+		// differs from what Unwrap extracts means content is ambiguous.
+		if err != nil || !bytes.Equal(payload, u.Payload) || len(ids) == 0 {
 			res.Status = attest.StatusFailed
+			return res
 		}
+		res.Status = attest.StatusVerified
+		res.Signers = ids
+		res.Payload = payload
 	case api.VerificationStatus_UNSIGNED:
-		res.Status = attest.StatusUnsigned
+		res.Status = notVerified
 	default:
 		res.Status = attest.StatusFailed
 	}
 	return res
+}
+
+// signedPayload returns the payload of the DSSE envelope of art: the
+// bytes whose signatures VerifyStatement checked (the key and SPIFFE
+// verifiers check signatures over the PAE of this envelope's payload,
+// sigstore-go re-encodes the bundle's envelope from these bytes). Nil
+// when art carries no DSSE envelope.
+func signedPayload(art signer.SignedArtifact) []byte {
+	switch a := art.(type) {
+	case *signer.EnvelopeArtifact:
+		return a.Envelope.GetPayload()
+	case *signer.BundleArtifact:
+		if a.Bundle != nil {
+			return a.Bundle.GetDsseEnvelope().GetPayload()
+		}
+	}
+	return nil
 }
 
 // signers returns the identity specs of ids, sorted and without

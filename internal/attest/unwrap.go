@@ -23,19 +23,6 @@ type Unwrapped struct {
 	Kind       string // KindBare, KindDSSE or KindBundle
 	Signatures int    // number of signatures of the envelope; 0 for KindBare
 	Payload    []byte // as Result.Payload
-
-	// PayloadIsStatement is true when Payload is the canonical JSON of
-	// the actual statement: bare content that itself parses as JSON, or
-	// (for KindDSSE/KindBundle) an envelope payload field that decoded
-	// as base64 and parsed as JSON. It is false when Payload instead
-	// falls back to the canonical JSON of the whole content, or to the
-	// content itself when that is not JSON either, because the
-	// envelope's payload could not be extracted (malformed base64, or
-	// bytes that are not JSON). A Verifier must treat false on a signed
-	// envelope (Kind != KindBare, Signatures > 0) as a reason to fail:
-	// the envelope does not carry a statement anyone could have signed
-	// in that form, so nothing trustworthy can be returned as Payload.
-	PayloadIsStatement bool
 }
 
 // Unwrap tells whether content is a DSSE envelope, a Sigstore bundle
@@ -45,17 +32,18 @@ type Unwrapped struct {
 // that is not JSON at all). It does not check signatures.
 //
 // Every field consulted here (mediaType, dsseEnvelope, payloadType,
-// payload, signatures) is looked up by its exact-case JSON key in a
-// map[string]json.RawMessage, not matched the way encoding/json matches
-// struct tags (which falls back to a case-insensitive match and lets
-// whichever same-or-different-case duplicate key appears last in the
-// object win). That exact-case lookup is deliberate: it is what keeps
-// Unwrap from ever extracting a differently-cased duplicate key (e.g. a
-// "Payload" alongside the real "payload") as the payload that was
-// signed — the one field a Verifier trusts completely.
+// payload, signatures) is looked up by its exact-case JSON key, so that
+// duplicate keys differing only in case are never matched.
+//
+// Unwrap is not how a Verifier learns which payload a signature covers:
+// signature libraries parse envelopes with their own rules (case-folding,
+// protojson field aliases, the last of duplicate keys winning, or
+// rejecting them), and no second parser can be relied on to agree with
+// them on crafted content. A Verifier takes a verified payload from the
+// envelope its library checked, and reports content on which that
+// disagrees with Unwrap as failed.
 func Unwrap(content []byte) Unwrapped {
-	payload, parsed := canonicalOrSelf(content)
-	u := Unwrapped{Kind: KindBare, Payload: payload, PayloadIsStatement: parsed}
+	u := Unwrapped{Kind: KindBare, Payload: canonicalOrSelf(content)}
 
 	top, ok := decodeObject(content)
 	if !ok {
@@ -88,7 +76,6 @@ func Unwrap(content []byte) Unwrapped {
 	}
 
 	u.Signatures = len(signatures)
-	u.PayloadIsStatement = false // reset: the top-level default no longer applies once inside an envelope
 	if !payloadPresent {
 		return u
 	}
@@ -101,7 +88,6 @@ func Unwrap(content []byte) Unwrapped {
 		return u
 	}
 	u.Payload = c
-	u.PayloadIsStatement = true
 	return u
 }
 
@@ -187,12 +173,11 @@ func decodeBase64(s string) ([]byte, bool) {
 	return nil, false
 }
 
-// canonicalOrSelf returns the canonical JSON of content, and true, when
-// content is valid JSON; otherwise it returns content itself (cloned) and
-// false.
-func canonicalOrSelf(content []byte) ([]byte, bool) {
+// canonicalOrSelf returns the canonical JSON of content when content is
+// valid JSON, otherwise content itself (cloned).
+func canonicalOrSelf(content []byte) []byte {
 	if c, err := Canonical(content); err == nil {
-		return c, true
+		return c
 	}
-	return bytes.Clone(content), false
+	return bytes.Clone(content)
 }

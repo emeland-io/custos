@@ -2,7 +2,6 @@ package attest
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"testing"
 )
@@ -151,64 +150,22 @@ func TestUnwrapMalformed(t *testing.T) {
 	}
 }
 
-// TestUnwrapIgnoresCaseVariantDuplicateKeys is a regression test for a
-// signature-verification bypass (see carabiner_test.go's
-// TestVerifyRejectsCaseVariantPayloadKey for the full exploit against a
-// signed envelope). At the Unwrap level: a JSON object with both a
-// "payload" key and a differently-cased "Payload" key duplicate must
-// resolve to the exact-case "payload" field, never to the duplicate.
-// encoding/json's struct-tag matching is case-insensitive when no
-// exact-case match is present for a tag, and lets whichever of several
-// matching keys appears last in the object win — Unwrap must not inherit
-// that behavior for the one field (payload) a Verifier trusts
-// completely.
+// TestUnwrapIgnoresCaseVariantDuplicateKeys: of a "payload" key and a
+// duplicate differing only in case, Unwrap takes the exact-case one,
+// wherever the duplicate stands. The content is concatenated, not
+// re-marshaled, so the key order is as written. (Verifiers do not rely on
+// this: see carabiner's TestVerifyNeverPairsVerifiedWithAnotherPayload.)
 func TestUnwrapIgnoresCaseVariantDuplicateKeys(t *testing.T) {
-	env := dsse(statement, base64.StdEncoding, `[{"keyid":"","sig":"c2ln"}]`)
-	var m map[string]any
-	if err := json.Unmarshal([]byte(env), &m); err != nil {
-		t.Fatal(err)
-	}
 	forged := base64.StdEncoding.EncodeToString([]byte(`{"forged":true}`))
-	m["Payload"] = forged // same field, different case, placed last when re-marshaled (keys sort: "Payload" < "payload")
-	attack, err := json.Marshal(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	u := Unwrap(attack)
-	if u.Kind != KindDSSE {
-		t.Fatalf("kind %q, want %q", u.Kind, KindDSSE)
-	}
-	if string(u.Payload) != statementCanonical {
-		t.Errorf("payload %s, want the original statement %s (the case-variant duplicate key must be ignored)", u.Payload, statementCanonical)
-	}
-	if !u.PayloadIsStatement {
-		t.Errorf("PayloadIsStatement = false, want true")
-	}
-}
-
-// TestUnwrapPayloadIsStatement exercises the PayloadIsStatement field
-// carabiner.Verify relies on to fail a signed envelope whose payload
-// could not be extracted as a statement (Review Focus 5), rather than
-// verify it under a fallback payload nobody signed in that exact form.
-func TestUnwrapPayloadIsStatement(t *testing.T) {
-	sigs := `[{"keyid":"","sig":"c2ln"}]`
-	for _, tc := range []struct {
-		name    string
-		content string
-		want    bool
-	}{
-		{"bare JSON", statement, true},
-		{"bare, not JSON", "not json", false},
-		{"signed envelope", dsse(statement, base64.StdEncoding, sigs), true},
-		{"envelope with a payload that is not JSON", dsse("plain text", base64.StdEncoding, sigs), false},
-		{"envelope with a payload that is not base64", `{"payloadType":"x","payload":"%%%","signatures":[]}`, false},
+	env := dsse(statement, base64.StdEncoding, `[{"keyid":"","sig":"c2ln"}]`)
+	for name, content := range map[string]string{
+		"duplicate last":  env[:len(env)-1] + fmt.Sprintf(`,"Payload":%q}`, forged),
+		"duplicate first": fmt.Sprintf(`{"Payload":%q,`, forged) + env[1:],
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := Unwrap([]byte(tc.content)).PayloadIsStatement; got != tc.want {
-				t.Errorf("PayloadIsStatement = %v, want %v", got, tc.want)
-			}
-		})
+		u := Unwrap([]byte(content))
+		if u.Kind != KindDSSE || string(u.Payload) != statementCanonical {
+			t.Errorf("%s: kind %q payload %s, want %q %s", name, u.Kind, u.Payload, KindDSSE, statementCanonical)
+		}
 	}
 }
 

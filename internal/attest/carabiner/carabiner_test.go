@@ -9,6 +9,7 @@ package carabiner
 // root.
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -207,9 +208,12 @@ func TestVerifyDSSE(t *testing.T) {
 		{"payload that is not base64", editJSON(t, signed, func(m map[string]any) {
 			m["payload"] = "%%%"
 		}), trusted, attest.StatusFailed, 0},
-		{"signed payload that is not JSON", editJSON(t, signed, func(m map[string]any) {
+		{"payload replaced by one that is not JSON", editJSON(t, signed, func(m map[string]any) {
 			m["payload"] = base64.StdEncoding.EncodeToString([]byte("plain text"))
 		}), trusted, attest.StatusFailed, 0},
+		// The signature over a payload that is not JSON is valid, but the
+		// payload is no statement.
+		{"signed payload that is not JSON", sign(t, []byte("plain text"), ed), trusted, attest.StatusFailed, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newVerifier(t, tc.keys).Verify(tc.content)
@@ -226,50 +230,124 @@ func TestVerifyDSSE(t *testing.T) {
 	}
 }
 
-// TestVerifyRejectsCaseVariantPayloadKey is a regression test for a
-// signature-verification bypass: a validly-signed DSSE envelope with a
-// second, differently-cased "Payload" key added (holding an entirely
-// different, forged statement) must never come back verified while
-// reporting the forged statement as Result.Payload. Before the fix,
-// attest.Unwrap decoded the envelope into a Go struct, whose field
-// matching falls back to being case-insensitive when no exact-case key
-// is present for a tag — and, critically, lets whichever of several
-// same-or-different-case keys appears last in the JSON object win. The
-// carabiner-dev signer library verifies the signature against the
-// original, exact-case "payload" field (so it legitimately reports
-// VERIFIED with the real signer's identity); Unwrap must agree with it on
-// which bytes that actually is.
-func TestVerifyRejectsCaseVariantPayloadKey(t *testing.T) {
+// withFields returns the JSON object obj with extra members spliced in
+// verbatim: before is inserted right after the opening brace, after right
+// before the closing one (either may be ""). The bytes are concatenated,
+// never re-marshaled, so the order of duplicate or conflicting keys is
+// exactly as written — json.Marshal of a map would sort the keys and so
+// decide which duplicate comes last.
+func withFields(t *testing.T, obj []byte, before, after string) []byte {
+	t.Helper()
+	s := strings.TrimSpace(string(obj))
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		t.Fatalf("not a JSON object: %s", obj)
+	}
+	parts := []string{}
+	for _, p := range []string{before, strings.TrimSpace(s[1 : len(s)-1]), after} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return []byte("{" + strings.Join(parts, ",") + "}")
+}
+
+// TestVerifyNeverPairsVerifiedWithAnotherPayload is the regression test
+// for a signature-verification bypass: content crafted so that the signer
+// library checks one envelope's signature while a second parser would
+// take the payload from somewhere else (a case-variant duplicate key, a
+// nested "dsseEnvelope" the library's own routing ignores, the snake_case
+// aliases only protojson understands, plain duplicate keys). Whatever the
+// content, a verified result must carry exactly the payload that was
+// signed; failed is an acceptable outcome for any of these documents.
+func TestVerifyNeverPairsVerifiedWithAnotherPayload(t *testing.T) {
 	ed := newKey(t, "ed25519")
 	real := statement(t, "artifact.tgz")
 	forged := statement(t, "forged-subject")
+	realB64 := base64.StdEncoding.EncodeToString(real)
+	forgedB64 := base64.StdEncoding.EncodeToString(forged)
 	signed := sign(t, real, ed)
-	attack := editJSON(t, signed, func(m map[string]any) {
-		// A second key, differing only in case from the real "payload",
-		// holding a base64-encoded statement nobody signed.
-		m["Payload"] = base64.StdEncoding.EncodeToString(forged)
-	})
-
-	v := newVerifier(t, map[string]testKey{"ed.pub": ed})
-	r := v.Verify(attack)
-
-	forgedCanonical := canonical(t, forged)
-	if string(r.Payload) == forgedCanonical {
-		t.Fatalf("bypass: Verify reported the attacker's forged statement as Payload (status %q)", r.Status)
+	var env struct {
+		Signatures json.RawMessage `json:"signatures"`
 	}
-	switch r.Status {
-	case attest.StatusVerified:
-		if want := canonical(t, real); string(r.Payload) != want {
-			t.Errorf("verified with payload %s, want the originally signed statement %s", r.Payload, want)
-		}
-		if len(r.Signers) == 0 {
-			t.Errorf("verified with no signers")
-		}
-	case attest.StatusFailed:
-		// Also an acceptable outcome: rejecting the ambiguous envelope
-		// outright.
-	default:
-		t.Errorf("status %q, want %q or %q", r.Status, attest.StatusVerified, attest.StatusFailed)
+	if err := json.Unmarshal(signed, &env); err != nil {
+		t.Fatal(err)
+	}
+	const bundleType = `"application/vnd.dev.sigstore.bundle.v0.3+json"`
+	forgedEnvelope := fmt.Sprintf(`{"payloadType":%q,"payload":%q,"signatures":[{"sig":"AAAA"}]}`, payloadType, forgedB64)
+
+	bundle, err := os.ReadFile("testdata/bnd-v0.4.6-provenance.bundle.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b struct {
+		DSSEEnvelope struct {
+			Payload string `json:"payload"`
+		} `json:"dsseEnvelope"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	bundleStmt, err := base64.StdEncoding.DecodeString(b.DSSEEnvelope.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		content []byte
+		signed  []byte // the statement the genuine signature covers
+	}{
+		// A case-variant duplicate of "payload" (encoding/json struct
+		// decoding matches it and lets the last one win).
+		{"Payload after payload", withFields(t, signed, "", fmt.Sprintf(`"Payload":%q`, forgedB64)), real},
+		{"Payload before payload", withFields(t, signed, fmt.Sprintf(`"Payload":%q`, forgedB64), ""), real},
+		{"PAYLOAD after payload", withFields(t, signed, "", fmt.Sprintf(`"PAYLOAD":%q`, forgedB64)), real},
+		// The library's probe matches "mediaType" case-insensitively, the
+		// last key winning, so it sees MediaType "" and verifies the
+		// top-level envelope; an exact-case reading sees a bundle and
+		// takes the payload of the nested, forged dsseEnvelope.
+		{"bundle decoy, then MediaType empty", withFields(t, signed, "",
+			`"mediaType":`+bundleType+`,"dsseEnvelope":`+forgedEnvelope+`,"MediaType":""`), real},
+		{"bundle decoy before the envelope, MediaType empty after", withFields(t, signed,
+			`"mediaType":`+bundleType+`,"dsseEnvelope":`+forgedEnvelope, `"MediaType":""`), real},
+		// The same with protojson's snake_case alias payload_type: the
+		// probe routes on the case-variant "PayloadType" (which protojson
+		// discards as unknown), protojson reads the real type from
+		// "payload_type", and there is no exact-case "payloadType" at all.
+		{"payload_type alias with bundle decoy", fmt.Appendf(nil,
+			`{"PayloadType":"x","payload_type":%q,"payload":%q,"signatures":%s,"mediaType":%s,"dsseEnvelope":%s,"MEDIATYPE":""}`,
+			payloadType, realB64, env.Signatures, bundleType, forgedEnvelope), real},
+		// The bundle's dsse_envelope alias next to its genuine dsseEnvelope.
+		{"bundle with a forged dsse_envelope", withFields(t, bundle, "", `"dsse_envelope":`+forgedEnvelope), bundleStmt},
+		{"bundle with a forged dsse_envelope first", withFields(t, bundle, `"dsse_envelope":`+forgedEnvelope, ""), bundleStmt},
+		// The genuine envelope under the alias alone: exact-case parsing
+		// finds no envelope at all.
+		{"bundle with its envelope under dsse_envelope", bytes.Replace(bundle, []byte(`"dsseEnvelope"`), []byte(`"dsse_envelope"`), 1), bundleStmt},
+		// A bundle with forged top-level envelope fields and the library's
+		// probe steered to the DSSE path.
+		{"bundle with forged top-level envelope, MediaType empty", withFields(t, bundle, "",
+			fmt.Sprintf(`"payloadType":%q,"payload":%q,"signatures":[{"sig":"AAAA"}],"MediaType":""`, payloadType, forgedB64)), bundleStmt},
+		// Exact duplicate keys, in both orders.
+		{"duplicate payload, forged last", withFields(t, signed, "", fmt.Sprintf(`"payload":%q`, forgedB64)), real},
+		{"duplicate payload, forged first", withFields(t, signed, fmt.Sprintf(`"payload":%q`, forgedB64), ""), real},
+		{"duplicate dsseEnvelope in the bundle", withFields(t, bundle, "", `"dsseEnvelope":`+forgedEnvelope), bundleStmt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newVerifier(t, map[string]testKey{"ed.pub": ed}).Verify(tc.content)
+			switch r.Status {
+			case attest.StatusVerified:
+				if want := canonical(t, tc.signed); string(r.Payload) != want {
+					t.Errorf("bypass: verified with payload %s, want the signed statement %s", r.Payload, want)
+				}
+				if len(r.Signers) == 0 {
+					t.Errorf("verified with no signers")
+				}
+			case attest.StatusFailed:
+			default:
+				t.Errorf("status %q, want %q or %q", r.Status, attest.StatusVerified, attest.StatusFailed)
+			}
+			t.Logf("status %s", r.Status)
+		})
 	}
 }
 
@@ -428,4 +506,61 @@ func TestConcurrentVerify(t *testing.T) {
 	for e := range errs {
 		t.Error(e)
 	}
+}
+
+// TestVerifyKeyCombinations splices every ordered choice of up to three
+// conflicting members (case variants, protojson aliases, decoy bundle
+// fields) before and after the members of a genuinely signed envelope
+// and checks that no result is verified with a payload other than the
+// signed one.
+func TestVerifyKeyCombinations(t *testing.T) {
+	ed := newKey(t, "ed25519")
+	real := statement(t, "artifact.tgz")
+	forgedB64 := base64.StdEncoding.EncodeToString(statement(t, "forged-subject"))
+	signed := sign(t, real, ed)
+	want := canonical(t, real)
+	forgedEnvelope := fmt.Sprintf(`{"payloadType":%q,"payload":%q,"signatures":[{"sig":"AAAA"}]}`, payloadType, forgedB64)
+	fragments := []string{
+		fmt.Sprintf(`"Payload":%q`, forgedB64),
+		fmt.Sprintf(`"payload":%q`, forgedB64),
+		`"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"`,
+		`"MediaType":""`,
+		`"media_type":"application/vnd.dev.sigstore.bundle.v0.3+json"`,
+		`"dsseEnvelope":` + forgedEnvelope,
+		`"dsse_envelope":` + forgedEnvelope,
+		`"PayloadType":""`,
+		`"payload_type":"x"`,
+		`"Signatures":[]`,
+	}
+	v := newVerifier(t, map[string]testKey{"ed.pub": ed})
+	check := func(content []byte) {
+		r := v.Verify(content)
+		if r.Status == attest.StatusVerified && string(r.Payload) != want {
+			t.Errorf("bypass: verified with payload %s for %s", r.Payload, content)
+		}
+	}
+	var seqs [][]string
+	for i := range fragments {
+		seqs = append(seqs, []string{fragments[i]})
+		for j := range fragments {
+			if j == i {
+				continue
+			}
+			seqs = append(seqs, []string{fragments[i], fragments[j]})
+			for k := range fragments {
+				if k != i && k != j {
+					seqs = append(seqs, []string{fragments[i], fragments[j], fragments[k]})
+				}
+			}
+		}
+	}
+	n := 0
+	for _, seq := range seqs {
+		// All before, all after, and split around the envelope's members.
+		for split := 0; split <= len(seq); split++ {
+			check(withFields(t, signed, strings.Join(seq[:split], ","), strings.Join(seq[split:], ",")))
+			n++
+		}
+	}
+	t.Logf("%d documents", n)
 }
