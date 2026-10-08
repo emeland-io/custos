@@ -272,6 +272,97 @@ func TestConcurrentAccepts(t *testing.T) {
 	}
 }
 
+// TestConcurrentAcceptsWithDifferentSelections guards against the compound
+// bug where the proposal branch's deletion happened in a lock span separate
+// from (and after) the main-branch commit's: a second Accept, racing in
+// between, could recompute its own (different) selection against the branch
+// while it still looked open and land a second, independent commit. With
+// disjoint selections there is no shared-path collision to hide the bug
+// behind, unlike TestConcurrentAccepts above (identical, nil selections),
+// which the fix must also keep passing.
+func TestConcurrentAcceptsWithDifferentSelections(t *testing.T) {
+	st := newStore(t)
+	propose(t, st, fixture.TaskB, digest1, twoTasksAndDoc)
+	before := mainOID(t, st)
+	sels := [][]string{{"task:host:web-01"}, {"task:host:db-01"}}
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = Accept(st, ws, fixture.TaskB, sels[i], person)
+		}(i)
+	}
+	wg.Wait()
+	var oks, notFound int
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			oks++
+		case errors.Is(err, store.ErrNotFound):
+			notFound++
+		default:
+			t.Errorf("accept: %v", err)
+		}
+	}
+	if oks != 1 || notFound != 1 {
+		t.Errorf("errs %v, want exactly one nil and one ErrNotFound", errs)
+	}
+	if n := gitCount(t, st, before+"..main"); n != 1 {
+		t.Errorf("%d commits on main, want exactly one", n)
+	}
+	if len(branches(t, st)) != 0 {
+		t.Errorf("branches %v, want none", branches(t, st))
+	}
+}
+
+// TestAcceptRacingReject guards against the other half of the same
+// compound bug: Accept and Reject of the same proposal, run concurrently,
+// each do their own read-then-act sequence, and without both acting under
+// one held lock each could observe the proposal as still theirs to finish
+// and report success — Accept landing its commit after Reject already
+// deleted the branch it thought it was still closing, or Reject deleting a
+// branch Accept had already consumed and was about to (or had just)
+// commit(ted) from. Exactly one of the two must win.
+func TestAcceptRacingReject(t *testing.T) {
+	st := newStore(t)
+	propose(t, st, fixture.TaskB, digest1, twoTasksAndDoc)
+	before := mainOID(t, st)
+	var wg sync.WaitGroup
+	var acceptErr, rejectErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = Accept(st, ws, fixture.TaskB, nil, person)
+	}()
+	go func() {
+		defer wg.Done()
+		rejectErr = Reject(st, ws, fixture.TaskB)
+	}()
+	wg.Wait()
+	acceptOK, rejectOK := acceptErr == nil, rejectErr == nil
+	if acceptOK == rejectOK {
+		t.Fatalf("accept err=%v, reject err=%v: exactly one must succeed", acceptErr, rejectErr)
+	}
+	if acceptErr != nil && !errors.Is(acceptErr, store.ErrNotFound) {
+		t.Errorf("accept error %v, want nil or ErrNotFound", acceptErr)
+	}
+	if rejectErr != nil && !errors.Is(rejectErr, store.ErrNotFound) {
+		t.Errorf("reject error %v, want nil or ErrNotFound", rejectErr)
+	}
+	landed := mainOID(t, st) != before
+	if acceptOK != landed {
+		t.Errorf("accept ok=%v but landed=%v: accept succeeding must mean, and only mean, it landed", acceptOK, landed)
+	}
+	if rejectOK && landed {
+		t.Errorf("reject succeeded but the proposal landed on main anyway")
+	}
+	if len(branches(t, st)) != 0 {
+		t.Errorf("branches %v, want none: one of accept/reject must have closed the proposal", branches(t, st))
+	}
+}
+
 func mustAccept(t *testing.T, st *store.Store, id string) {
 	t.Helper()
 	if _, err := Accept(st, ws, id, nil, person); err != nil {

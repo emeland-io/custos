@@ -25,6 +25,38 @@ import (
 // when it moved).
 func (s *Store) UpdateWorkspace(id, ref string, author gitrepo.Signature, message string,
 	edit func(tree fs.FS) ([]gitrepo.Change, error)) (string, error) {
+	return s.UpdateWorkspaceAndThen(id, ref, author, message, edit, nil)
+}
+
+// UpdateWorkspaceAndThen is UpdateWorkspace, but when the update to ref
+// actually reaches the repository — a new commit written and moved onto ref,
+// or, when edit asked for nothing effective, the existing oid kept as is —
+// and before the workspace's lock is released, it also calls then with the
+// repository and the resulting oid.
+//
+// then runs inside the very same s.Lock(id) span edit did: nothing else that
+// also takes this lock (another UpdateWorkspace/UpdateWorkspaceAndThen call,
+// or a caller of Lock directly, such as internal/proposal's Write, Reject and
+// Accept) can run between the ref update and then. This is what lets a caller
+// combine moving ref with another change to the same repository that must
+// happen exactly together with that move — such as Accept deleting the
+// accepted proposal's branch only once its content has actually landed on
+// main, atomically with the landing, so a concurrent Accept or Reject of the
+// same proposal reliably observes either "not landed yet" or "landed and the
+// proposal branch is already gone," never a window where the branch still
+// looks open after main has already moved past it (which is what let two
+// concurrent Accepts, or an Accept racing a Reject, both report success for
+// one proposal before this existed).
+//
+// then must not call s.Lock(id) (or Lock(id)) itself — it is already held,
+// and this package's lock is not reentrant, so doing so would deadlock.
+// then's error is returned together with the oid, since the ref update
+// already happened and must not be reported as if it had not; then is not
+// called at all when edit fails or the update never reaches a ref write
+// (a RejectedError, or a lost compare-and-swap this call does not retry on
+// its own).
+func (s *Store) UpdateWorkspaceAndThen(id, ref string, author gitrepo.Signature, message string,
+	edit func(tree fs.FS) ([]gitrepo.Change, error), then func(repo *gitrepo.Repo, oid string) error) (string, error) {
 	repo, err := s.WorkspaceRepo(id)
 	if err != nil {
 		return "", err
@@ -34,6 +66,22 @@ func (s *Store) UpdateWorkspace(id, ref string, author gitrepo.Signature, messag
 	}
 	unlock := s.Lock(id)
 	defer unlock()
+	oid, err := s.updateWorkspaceLocked(repo, id, ref, author, message, edit)
+	if err != nil {
+		return "", err
+	}
+	if then != nil {
+		if terr := then(repo, oid); terr != nil {
+			return oid, terr
+		}
+	}
+	return oid, nil
+}
+
+// updateWorkspaceLocked is UpdateWorkspace's body, run by a caller that
+// already holds s.Lock(id) for its whole duration (UpdateWorkspaceAndThen).
+func (s *Store) updateWorkspaceLocked(repo *gitrepo.Repo, id, ref string, author gitrepo.Signature, message string,
+	edit func(tree fs.FS) ([]gitrepo.Change, error)) (string, error) {
 	old, _, err := repo.ResolveRef(ref)
 	if err != nil {
 		return "", err

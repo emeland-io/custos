@@ -348,17 +348,23 @@ func lastPerPath(changes []gitrepo.Change) []gitrepo.Change {
 	return out
 }
 
-// Reject deletes the open proposal of taskID; store.ErrNotFound when none.
+// Reject deletes the open proposal of taskID; store.ErrNotFound when none,
+// including a proposal an Accept running concurrently already closed: the
+// existence check and the delete run under one held st.Lock(wsID) span
+// (rather than checking before taking the lock, as this used to), so Reject
+// and Accept of the same proposal — which also now does its own check and
+// delete under this same lock, around the main-branch commit (see
+// accept.go's Accept) — can never both report success for one proposal.
 func Reject(st *store.Store, wsID, taskID string) error {
 	repo, err := st.WorkspaceRepo(wsID)
 	if err != nil {
 		return err
 	}
+	unlock := st.Lock(wsID)
+	defer unlock()
 	if _, err := first(repo, taskID); err != nil {
 		return err
 	}
-	unlock := st.Lock(wsID)
-	defer unlock()
 	return deleteRefs(repo, refPrefix+taskID+"/")
 }
 

@@ -22,6 +22,22 @@ import (
 // Selecting an unchanged item is allowed and changes nothing. When main
 // already holds everything selected, no commit is made and main's current
 // commit is returned.
+//
+// The commit onto main and the deletion of the proposal branch happen as
+// one atomic step, under one held workspace lock (store.UpdateWorkspaceAndThen):
+// the edit callback first re-resolves the proposal branch and requires it
+// still names the commit read before the lock was taken (gone → ErrNotFound,
+// since there is then no open proposal any more; moved to another commit,
+// by a concurrent Write replacing it → store.ErrConflict, retried with the
+// fresh branch), and only once the main commit has actually landed does the
+// then callback delete the branch, still under the same lock. Without this,
+// two concurrent Accepts of one proposal (even with disjoint selections), or
+// an Accept racing a Reject, could each observe the branch as still open and
+// both land their own commit onto main — the lock span that used to cover
+// only the main-branch compare-and-swap left a window, after it released but
+// before a separate, later-acquired lock span deleted the branch, for a
+// second accept to run its own full read-compute-commit sequence against the
+// same, now-stale, proposal.
 func Accept(st *store.Store, wsID, taskID string, selected []string, author gitrepo.Signature) (commit string, err error) {
 	if selected != nil && len(selected) == 0 {
 		return "", fmt.Errorf("%w: select at least one item, or reject the proposal", ErrInvalid)
@@ -41,8 +57,11 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 			return "", err
 		}
 		tip := loadSide(tipFS)
-		commit, err = st.UpdateWorkspace(wsID, mainRef, author, "Accept output proposal "+p.Branch,
+		commit, err = st.UpdateWorkspaceAndThen(wsID, mainRef, author, "Accept output proposal "+p.Branch,
 			func(tree fs.FS) ([]gitrepo.Change, error) {
+				if err := checkBranchUnchanged(repo, p); err != nil {
+					return nil, err
+				}
 				es, err := diff(loadSide(tree), tip, p.Task, p.Cascade)
 				if err != nil {
 					return nil, err
@@ -60,6 +79,9 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 					}
 				}
 				return changes, nil
+			},
+			func(repo *gitrepo.Repo, _ string) error {
+				return deleteBranch(repo, p)
 			})
 		if !errors.Is(err, store.ErrConflict) {
 			break
@@ -68,13 +90,32 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 	if err != nil {
 		return "", err
 	}
-	if err := deleteBranch(st, wsID, repo, p); err != nil {
-		return commit, fmt.Errorf("accepted as %s, but the proposal branch was not deleted: %w", commit, err)
-	}
 	if err := openCascades(st, wsID, repo, commit, removed); err != nil {
 		return commit, fmt.Errorf("accepted as %s, but a cascade proposal could not be opened: %w", commit, err)
 	}
 	return commit, nil
+}
+
+// checkBranchUnchanged requires that p's branch still names p.Commit, as
+// seen under the workspace's lock (the caller runs this from inside
+// store.UpdateWorkspaceAndThen's edit callback, which already holds it). A
+// branch that is gone means the proposal was already accepted or rejected
+// by someone else: store.ErrNotFound, matching what a fresh Get/Accept of
+// the same task would now report. A branch that moved to a different commit
+// means a concurrent Write replaced the proposal: store.ErrConflict, which
+// Accept's retry loop treats as "re-read the proposal and try again."
+func checkBranchUnchanged(repo *gitrepo.Repo, p *Proposal) error {
+	cur, ok, err := repo.ResolveRef(headsPrefix + p.Branch)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: no open output proposal for task %s", store.ErrNotFound, p.Task)
+	}
+	if cur != p.Commit {
+		return fmt.Errorf("%w: proposal %s moved to %s while being accepted", store.ErrConflict, p.Branch, cur)
+	}
+	return nil
 }
 
 // choose returns the entries selected (nil = all that are not unchanged).
@@ -106,11 +147,13 @@ func choose(es []entry, selected []string) ([]entry, error) {
 	return out, nil
 }
 
-// deleteBranch deletes the accepted proposal's branch. When a newer run
-// replaced the branch meanwhile, the newer proposal is kept.
-func deleteBranch(st *store.Store, wsID string, repo *gitrepo.Repo, p *Proposal) error {
-	unlock := st.Lock(wsID)
-	defer unlock()
+// deleteBranch deletes the accepted proposal's branch. It runs as
+// store.UpdateWorkspaceAndThen's then callback (see Accept), already under
+// the workspace's lock, so it must not (and does not) take the lock itself.
+// A branch already gone — deleted by this very call on a successful CAS, or,
+// in principle, moved under us, which checkBranchUnchanged already ruled
+// out earlier in the very same lock span — is not an error.
+func deleteBranch(repo *gitrepo.Repo, p *Proposal) error {
 	err := repo.DeleteRef(headsPrefix+p.Branch, p.Commit)
 	if errors.Is(err, gitrepo.ErrRefMoved) {
 		return nil
