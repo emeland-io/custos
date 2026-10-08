@@ -123,6 +123,45 @@ func TestPlanResignedDocumentIsUnchanged(t *testing.T) {
 	}
 }
 
+// mismatchedDocWorkspace is emptyWorkspace with a document of TaskB's
+// answer whose stored verification.status is "failed" even though its
+// content is a well-formed envelope that envelopeVerifier would verify —
+// simulating drift between what main's stored label says and what a fresh
+// re-verification of the same bytes would conclude.
+func mismatchedDocWorkspace() map[string]string {
+	return with(emptyWorkspace(), map[string]string{docPath(fixture.DocID): `{"match_key":"att","name":"att","media_type":"application/json",` +
+		`"produced_by":{"task":{"id":"` + fixture.TaskB + `","version":"1.0.0"},"processor":"host-scanner","digest":"` + digest +
+		`","answer_commit":"` + fixture.Commit + `"},"verification":{"status":"failed"},` +
+		`"content":{"payload":{"subject":"web-01"},"sig":"1"}}`})
+}
+
+// TestPlanUnchangedDocumentKeepsStoredVerification is a regression test:
+// the old (main) document is labelled "failed" while a fresh
+// re-verification of the same bytes (and of the new run's output, which
+// carries the same payload under a different signature) would conclude
+// "verified". Because the document is Unchanged, no file is written, so
+// the reported item must describe what main actually holds ("failed"),
+// not the discarded new-run result ("verified").
+func TestPlanUnchangedDocumentKeepsStoredVerification(t *testing.T) {
+	files := mismatchedDocWorkspace()
+	run := newRun(t, files)
+	run.Verifier = envelopeVerifier{}
+	doc := contract.OutputDocument{MatchKey: "att", Name: "att", MediaType: "application/json",
+		Content: json.RawMessage(`{"sig":"2","payload":{"subject":"web-01"}}`)}
+	ch, err := Plan(run, &contract.Output{Documents: []contract.OutputDocument{doc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantItems(t, ch.Items, Item{Kind: KindDocument, MatchKey: "att", Action: Unchanged, ID: fixture.DocID, Title: "att"})
+	if len(ch.Files) != 0 {
+		t.Errorf("files %v, want none", paths(ch.Files))
+	}
+	v := ch.Items[0].Verification
+	if v == nil || v.Status != attest.StatusFailed {
+		t.Errorf("verification %+v, want status %q (what main holds, not the new run's %q)", v, attest.StatusFailed, attest.StatusVerified)
+	}
+}
+
 func TestPlanChangedDocumentKeepsItsFile(t *testing.T) {
 	for name, c := range map[string]struct {
 		doc    contract.OutputDocument

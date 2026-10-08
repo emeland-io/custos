@@ -29,7 +29,10 @@ func (p *planner) documents(out []contract.OutputDocument) error {
 			item.Action, item.ID = Added, p.run.NewID()
 		case old.Name == d.Name && old.MediaType == d.MediaType &&
 			bytes.Equal(p.run.Verifier.Verify(old.Content).Payload, res.Payload):
-			item.Action, item.ID = Unchanged, documentID(old.Path)
+			// Unchanged describes what main actually holds: the stored
+			// document's own verification, not the new run's (which is
+			// discarded — no file is written for Unchanged).
+			item.Action, item.ID, item.Verification = Unchanged, documentID(old.Path), old.Verification
 			p.items = append(p.items, item)
 			continue
 		default:
