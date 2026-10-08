@@ -11,33 +11,50 @@ import (
 	"github.com/emeland-io/custos/internal/store"
 )
 
+// errReplaced marks the store.ErrConflict of an Accept whose proposal was
+// replaced (by a Write, or by the cascade opened by an accepted removal of
+// its task) while the Accept was in flight. Unlike a compare-and-swap on
+// main lost to a push, it is not retried: the caller reviewed and selected
+// from the proposal that was replaced, and the new one can hold entirely
+// different items.
+var errReplaced = errors.New("the proposal was replaced while being accepted")
+
+// beforeAcceptLock, when not nil, is called by Accept after it read the
+// proposal and before it first takes the workspace's lock. Tests use it to
+// land a concurrent change in exactly that window; it is nil otherwise.
+var beforeAcceptLock func()
+
 // Accept applies the selected items ("task:<match_key>" / "document:<match_key>";
 // nil = all that are not Unchanged) of the open proposal of taskID to the
-// current main in one commit by author (validated, compare-and-swap; on
-// store.ErrConflict it re-reads and retries up to three times), deletes the
-// proposal branch, and opens a cascade proposal for every accepted removal
-// of a generated task that has tasks below it (match.Below) or documents
-// made from its answer. An unknown selector or an empty, non-nil selection
-// is ErrInvalid (400); no open proposal is store.ErrNotFound (404).
-// Selecting an unchanged item is allowed and changes nothing. When main
-// already holds everything selected, no commit is made and main's current
-// commit is returned.
+// current main in one commit by author (validated, compare-and-swap; when a
+// push moves main under it, it retries up to three times), deletes the
+// proposal branch, and, for every accepted removal of a generated task,
+// closes that task's own open proposals and opens its cascade proposal when
+// tasks below it (match.Below) or documents made from its answer or theirs
+// remain on main. An unknown selector or an empty, non-nil selection is
+// ErrInvalid (400); no open proposal is store.ErrNotFound (404); a proposal
+// replaced while this call was in flight is store.ErrConflict (409, not
+// retried). Selecting an unchanged item is allowed and changes nothing. When
+// main already holds everything selected, no commit is made and main's
+// current commit is returned.
 //
-// The commit onto main and the deletion of the proposal branch happen as
-// one atomic step, under one held workspace lock (store.UpdateWorkspaceAndThen):
-// the edit callback first re-resolves the proposal branch and requires it
-// still names the commit read before the lock was taken (gone → ErrNotFound,
-// since there is then no open proposal any more; moved to another commit,
-// by a concurrent Write replacing it → store.ErrConflict, retried with the
-// fresh branch), and only once the main commit has actually landed does the
-// then callback delete the branch, still under the same lock. Without this,
-// two concurrent Accepts of one proposal (even with disjoint selections), or
-// an Accept racing a Reject, could each observe the branch as still open and
-// both land their own commit onto main — the lock span that used to cover
-// only the main-branch compare-and-swap left a window, after it released but
-// before a separate, later-acquired lock span deleted the branch, for a
-// second accept to run its own full read-compute-commit sequence against the
-// same, now-stale, proposal.
+// When the commit landed but closing the proposal or opening a cascade then
+// failed, the commit is returned together with the error, so callers tell
+// "landed, with a warning" (commit != "") from "nothing landed" (commit "").
+//
+// Everything happens under one held workspace lock
+// (store.UpdateWorkspaceAndThen): the edit callback requires the proposal
+// branch to still name the commit read before the lock was taken and
+// recomputes the items against the main it commits on; the then callback,
+// still under the same lock and only once the commit has landed, deletes
+// the proposal branch and, for every removed task R, deletes everything
+// below custos/proposal/<R>/ (R's own open proposal must never land under a
+// task that is gone) and writes R's cascade from the tree just committed.
+// Nothing else that takes the lock — another Accept, a Reject, a Write — can
+// run between the commit and these branch updates, so a concurrent Accept
+// of R's own proposal either lands first (and R's cascade then covers what
+// it added) or finds its proposal replaced, and no cascade is computed from
+// a stale tree.
 func Accept(st *store.Store, wsID, taskID string, selected []string, author gitrepo.Signature) (commit string, err error) {
 	if selected != nil && len(selected) == 0 {
 		return "", fmt.Errorf("%w: select at least one item, or reject the proposal", ErrInvalid)
@@ -46,17 +63,21 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 	if err != nil {
 		return "", err
 	}
-	var p *Proposal
+	p, err := first(repo, taskID)
+	if err != nil {
+		return "", err
+	}
+	tipFS, err := repo.TreeFS(p.Commit)
+	if err != nil {
+		return "", err
+	}
+	tip := loadSide(tipFS)
+	if beforeAcceptLock != nil {
+		beforeAcceptLock()
+	}
 	var removed []string
+	landed := false
 	for range maxConflictRetries {
-		if p, err = first(repo, taskID); err != nil {
-			return "", err
-		}
-		var tipFS fs.FS
-		if tipFS, err = repo.TreeFS(p.Commit); err != nil {
-			return "", err
-		}
-		tip := loadSide(tipFS)
 		commit, err = st.UpdateWorkspaceAndThen(wsID, mainRef, author, "Accept output proposal "+p.Branch,
 			func(tree fs.FS) ([]gitrepo.Change, error) {
 				if err := checkBranchUnchanged(repo, p); err != nil {
@@ -80,42 +101,48 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 				}
 				return changes, nil
 			},
-			func(repo *gitrepo.Repo, _ string) error {
-				return deleteBranch(repo, p)
+			func(repo *gitrepo.Repo, oid string) error {
+				landed = true
+				return errors.Join(deleteBranch(repo, p), openCascades(repo, oid, removed))
 			})
-		if !errors.Is(err, store.ErrConflict) {
+		// Retry only a compare-and-swap on main lost to a push: never once
+		// the commit landed, and never for a replaced proposal.
+		if landed || !errors.Is(err, store.ErrConflict) || errors.Is(err, errReplaced) {
 			break
 		}
 	}
 	if err != nil {
+		if landed {
+			return commit, fmt.Errorf("accepted as %s, but closing the proposal or opening a cascade failed: %w", commit, err)
+		}
 		return "", err
-	}
-	if err := openCascades(st, wsID, repo, commit, removed); err != nil {
-		return commit, fmt.Errorf("accepted as %s, but a cascade proposal could not be opened: %w", commit, err)
 	}
 	return commit, nil
 }
 
 // checkBranchUnchanged requires that p's branch still names p.Commit, as
 // seen under the workspace's lock (the caller runs this from inside
-// store.UpdateWorkspaceAndThen's edit callback, which already holds it). A
-// branch that is gone means the proposal was already accepted or rejected
-// by someone else: store.ErrNotFound, matching what a fresh Get/Accept of
-// the same task would now report. A branch that moved to a different commit
-// means a concurrent Write replaced the proposal: store.ErrConflict, which
-// Accept's retry loop treats as "re-read the proposal and try again."
+// store.UpdateWorkspaceAndThen's edit callback, which already holds it).
+// Otherwise: when the task has no open proposal any more, it was accepted or
+// rejected by someone else — store.ErrNotFound, as a fresh Get of the task
+// would now report; when the branch names another commit, or another
+// proposal of the task took its place (a Write with another digest, or the
+// cascade opened by an accepted removal of the task), the proposal was
+// replaced — store.ErrConflict marked errReplaced, which Accept returns to
+// its caller instead of retrying.
 func checkBranchUnchanged(repo *gitrepo.Repo, p *Proposal) error {
 	cur, ok, err := repo.ResolveRef(headsPrefix + p.Branch)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return fmt.Errorf("%w: no open output proposal for task %s", store.ErrNotFound, p.Task)
+	if ok && cur == p.Commit {
+		return nil
 	}
-	if cur != p.Commit {
-		return fmt.Errorf("%w: proposal %s moved to %s while being accepted", store.ErrConflict, p.Branch, cur)
+	now, err := first(repo, p.Task)
+	if err != nil {
+		return err // store.ErrNotFound when the task has no open proposal
 	}
-	return nil
+	return fmt.Errorf("%w: %w: %s is now %s at %s", store.ErrConflict, errReplaced, p.Branch, now.Branch, now.Commit)
 }
 
 // choose returns the entries selected (nil = all that are not unchanged).
@@ -161,26 +188,26 @@ func deleteBranch(repo *gitrepo.Repo, p *Proposal) error {
 	return err
 }
 
-// openCascades opens a cascade proposal, from main at commit, for each
-// removed generated task that has generated tasks below it or documents made
-// from its answer or theirs.
-func openCascades(st *store.Store, wsID string, repo *gitrepo.Repo, commit string, removed []string) error {
+// openCascades handles every removed generated task id as part of the
+// accept that removed it: it runs as store.UpdateWorkspaceAndThen's then
+// callback, under the lock already held, with oid the commit main now names.
+// For each id it deletes every open proposal of id (the task is gone, so
+// none may land any more) and then writes id's cascade, computed from the
+// tree of oid, when tasks below id or documents made from its answer or
+// theirs remain there. A failure for one id does not stop the others.
+func openCascades(repo *gitrepo.Repo, oid string, removed []string) error {
 	if len(removed) == 0 {
 		return nil
 	}
-	fsys, err := repo.TreeFS(commit)
+	tree, err := repo.TreeFS(oid)
 	if err != nil {
 		return err
 	}
-	main := loadSide(fsys)
+	main := loadSide(tree)
 	var errs []error
 	for _, id := range removed {
-		files := cascadeFiles(main, id)
-		if len(files) == 0 {
-			continue
-		}
 		msg := "Propose removing what was generated below task " + id
-		if _, err := writeBranch(st, wsID, id, cascadeBranch(id), files, msg); err != nil {
+		if _, err := replaceProposals(repo, id, cascadeBranch(id), oid, tree, cascadeFiles(main, id), msg); err != nil {
 			errs = append(errs, fmt.Errorf("task %s: %w", id, err))
 		}
 	}
