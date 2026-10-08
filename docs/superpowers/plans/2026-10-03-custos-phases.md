@@ -62,7 +62,7 @@ The plans run in order, and each needs the ones before it.
 | --- | --- | --- | --- |
 | [3a](2026-10-04-phase-3a-runner.md) | Processor contract (input and output JSON), container runner through the Docker or Podman CLI, and the test images echo, generate, sign, fail and loop | 5 | Done |
 | [3b](2026-10-04-phase-3b-attest.md) | Verifying documents: DSSE envelopes, Sigstore bundles and bare statements, with the carabiner-dev libraries (ADR 0001) | 4 | Done |
-| [3c](2026-10-04-phase-3c-proposals.md) | Matching output against earlier output, the depth limit, proposal branches, accepting all or some items, rejecting, cascading removal | 5 | Not started |
+| [3c](2026-10-04-phase-3c-proposals.md) | Matching output against earlier output, the depth limit, proposal branches, accepting all or some items, rejecting, cascading removal | 5 | Done |
 | [3d](2026-10-04-phase-3d-runs.md) | Run records, queue and workers, finding the runs needed after answers, pushes, pin moves and merges; REST endpoints, `serve` flags, merge reruns (replacing ruling 2.10), dry runs | 8 | Not started |
 | [3e](2026-10-04-phase-3e-sdk.md) | Go and Python SDKs, `custos processor test` with golden files, Makefile and README | 6 | Not started |
 
