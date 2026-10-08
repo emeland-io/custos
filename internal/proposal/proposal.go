@@ -6,6 +6,7 @@
 package proposal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"testing/fstest"
 
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/match"
@@ -208,8 +210,14 @@ func Write(st *store.Store, wsID, taskID, digest string, ch *match.Changes, mess
 	return writeBranch(st, wsID, taskID, Branch(taskID, digest), files, message)
 }
 
-// writeBranch deletes every open proposal of taskID and then writes files
-// as a new branch from main, retrying when a push wins a compare-and-swap.
+// writeBranch deletes every open proposal of taskID and then writes files as
+// a new branch from main, retrying when a push wins a compare-and-swap. The
+// whole delete-then-write sequence of one attempt runs under a single held
+// workspace lock (writeBranchLocked), so two concurrent writes for the same
+// task — even naming different digests, which would not otherwise collide
+// on a compare-and-swap, because they write different branch names — can
+// never both leave an open proposal: whichever one's locked section runs
+// last deletes whatever the other just created.
 func writeBranch(st *store.Store, wsID, taskID, branch string, files []gitrepo.Change, message string) (string, error) {
 	if !task.ValidID(taskID) {
 		return "", fmt.Errorf("%w: task id %q is not a lowercase UUID v4", ErrInvalid, taskID)
@@ -220,15 +228,7 @@ func writeBranch(st *store.Store, wsID, taskID, branch string, files []gitrepo.C
 	}
 	var commit string
 	for range maxConflictRetries {
-		if err = deleteAll(st, wsID, repo, taskID); err != nil {
-			break
-		}
-		if len(files) == 0 {
-			return "", nil
-		}
-		commit, err = st.UpdateWorkspace(wsID, headsPrefix+branch, gitrepo.Bot, message, func(fs.FS) ([]gitrepo.Change, error) {
-			return files, nil
-		})
+		commit, err = writeBranchLocked(st, wsID, repo, taskID, branch, files, message)
 		if !errors.Is(err, store.ErrConflict) {
 			break
 		}
@@ -239,12 +239,59 @@ func writeBranch(st *store.Store, wsID, taskID, branch string, files []gitrepo.C
 	return branch, nil
 }
 
-// deleteAll deletes the open proposal branches of taskID under the
-// workspace's lock.
-func deleteAll(st *store.Store, wsID string, repo *gitrepo.Repo, taskID string) error {
+// writeBranchLocked does one attempt of writeBranch's delete-then-write
+// sequence under one held st.Lock(wsID) span: it deletes every open
+// proposal of taskID and then, if files is non-empty, writes it as branch's
+// new tip based on the current main. Holding the lock across both steps
+// (rather than taking and releasing it once per step, as store.UpdateWorkspace
+// would do on its own) is what makes the sequence atomic with respect to any
+// other writeBranch call for the same workspace running in this process.
+// Pushes still bypass this lock (ruling 2.3), so the final ref update
+// remains a compare-and-swap, reported as store.ErrConflict for the caller
+// to retry.
+func writeBranchLocked(st *store.Store, wsID string, repo *gitrepo.Repo, taskID, branch string, files []gitrepo.Change, message string) (string, error) {
 	unlock := st.Lock(wsID)
 	defer unlock()
-	refs, err := repo.Refs(refPrefix + taskID + "/")
+	if err := deleteRefs(repo, refPrefix+taskID+"/"); err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+	main, ok, err := repo.ResolveRef(mainRef)
+	if err != nil {
+		return "", err
+	}
+	var tree fs.FS = fstest.MapFS{}
+	if ok {
+		if tree, err = repo.TreeFS(main); err != nil {
+			return "", err
+		}
+	}
+	changes := effectiveChanges(tree, files)
+	if len(changes) == 0 {
+		return "", nil
+	}
+	req := gitrepo.CommitRequest{Changes: changes, Author: gitrepo.Bot, Message: message}
+	if ok {
+		req.Base, req.Parents = main, []string{main}
+	}
+	commit, err := repo.WriteCommit(req)
+	if err != nil {
+		return "", err
+	}
+	if err := repo.UpdateRef(headsPrefix+branch, commit, ""); err != nil {
+		return "", conflict(err)
+	}
+	return commit, nil
+}
+
+// deleteRefs deletes every ref below prefix. Callers that must not let
+// another writer interleave between this and a following write hold
+// st.Lock(wsID) across both (writeBranchLocked); Reject, which only
+// deletes, takes the lock itself.
+func deleteRefs(repo *gitrepo.Repo, prefix string) error {
+	refs, err := repo.Refs(prefix)
 	if err != nil {
 		return err
 	}
@@ -256,6 +303,51 @@ func deleteAll(st *store.Store, wsID string, repo *gitrepo.Repo, taskID string) 
 	return nil
 }
 
+// effectiveChanges drops changes that would leave tree exactly as it already
+// is, mirroring store.UpdateWorkspace's own no-op filtering. writeBranchLocked
+// writes commits directly through gitrepo rather than through
+// store.UpdateWorkspace (to keep the delete-then-write sequence under one
+// lock instead of two), so it must replicate this filtering itself; without
+// it, a run whose output main already holds would open a vacuous proposal
+// instead of none (Review Focus item 3).
+func effectiveChanges(tree fs.FS, changes []gitrepo.Change) []gitrepo.Change {
+	changes = lastPerPath(changes)
+	var out []gitrepo.Change
+	for _, c := range changes {
+		if c.Delete {
+			if info, err := fs.Stat(tree, c.Path); err == nil && info.IsDir() {
+				continue // nothing to delete: the path is a directory, not a file
+			}
+		}
+		cur, err := fs.ReadFile(tree, c.Path)
+		missing := errors.Is(err, fs.ErrNotExist)
+		if c.Delete && missing || !c.Delete && err == nil && bytes.Equal(cur, c.Data) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// lastPerPath keeps only the last change to each path, in the order its
+// first occurrence appeared.
+func lastPerPath(changes []gitrepo.Change) []gitrepo.Change {
+	latest := make(map[string]gitrepo.Change, len(changes))
+	for _, c := range changes {
+		latest[c.Path] = c
+	}
+	seen := make(map[string]bool, len(changes))
+	var out []gitrepo.Change
+	for _, c := range changes {
+		if seen[c.Path] {
+			continue
+		}
+		seen[c.Path] = true
+		out = append(out, latest[c.Path])
+	}
+	return out
+}
+
 // Reject deletes the open proposal of taskID; store.ErrNotFound when none.
 func Reject(st *store.Store, wsID, taskID string) error {
 	repo, err := st.WorkspaceRepo(wsID)
@@ -265,7 +357,9 @@ func Reject(st *store.Store, wsID, taskID string) error {
 	if _, err := first(repo, taskID); err != nil {
 		return err
 	}
-	return deleteAll(st, wsID, repo, taskID)
+	unlock := st.Lock(wsID)
+	defer unlock()
+	return deleteRefs(repo, refPrefix+taskID+"/")
 }
 
 // conflict reports a ref that moved under us as store.ErrConflict.

@@ -3,6 +3,7 @@ package proposal
 import (
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/emeland-io/custos/internal/contract"
@@ -76,6 +77,43 @@ func TestWriteReplacesProposalsOfTheTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSummary(t, p.Items, "task three added →1.0.0")
+}
+
+// TestWriteConcurrentDigestsLeaveOneProposal guards against the race where
+// two Write calls for the same task but different digests interleave their
+// delete-then-write sequences: each writes to a different branch name, so
+// there is no compare-and-swap collision to catch two proposals surviving
+// at once unless the whole sequence (delete the task's other proposals,
+// then write the new one) is atomic per call.
+func TestWriteConcurrentDigestsLeaveOneProposal(t *testing.T) {
+	st := newStore(t)
+	chA := plan(t, st, fixture.TaskB, contract.Output{Tasks: []contract.OutputTask{textTask("a", "A")}})
+	chB := plan(t, st, fixture.TaskB, contract.Output{Tasks: []contract.OutputTask{textTask("b", "B")}})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = Write(st, ws, fixture.TaskB, digest1, chA, "concurrent A")
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = Write(st, ws, fixture.TaskB, digest2, chB, "concurrent B")
+	}()
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	got := branches(t, st)
+	if len(got) != 1 {
+		t.Fatalf("branches %v, want exactly one open proposal for the task", got)
+	}
+	wantA, wantB := Branch(fixture.TaskB, digest1), Branch(fixture.TaskB, digest2)
+	if got[0] != wantA && got[0] != wantB {
+		t.Errorf("branch %q is neither %q nor %q", got[0], wantA, wantB)
+	}
 }
 
 func TestWriteWithoutChangesClosesProposals(t *testing.T) {
