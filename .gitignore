@@ -38,3 +38,6 @@ web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
 /.claude/worktrees/
+
+# Python
+__pycache__/
