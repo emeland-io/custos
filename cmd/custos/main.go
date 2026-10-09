@@ -11,7 +11,9 @@ import (
 const usage = `custos manages a task catalog and the workspaces that answer its tasks.
 
 Usage:
-  custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
+  custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL] [--container-runtime CMD]
+               [--secrets-dir DIR] [--processor-memory SIZE] [--processor-workers N]
+               [--max-generation-depth N] [--trusted-keys DIR]
   custos validate [--against REV] [DIR]
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
   custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID

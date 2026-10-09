@@ -38,7 +38,7 @@ func TestOpenAPI(t *testing.T) {
 
 // TestOpenServerServesAPI checks the wiring serve uses.
 func TestOpenServerServesAPI(t *testing.T) {
-	srv, err := openServer(t.TempDir(), "http://127.0.0.1:8080", io.Discard)
+	srv, err := openServer(t.Context(), t.TempDir(), "http://127.0.0.1:8080", defaultProcessorOptions(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

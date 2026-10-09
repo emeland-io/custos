@@ -33,8 +33,14 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	dataDir := fl.String("data-dir", os.Getenv("CUSTOS_DATA_DIR"), "directory holding the repositories (env CUSTOS_DATA_DIR)")
 	addr := fl.String("addr", envOr("CUSTOS_ADDR", defaultAddr), "listen address (env CUSTOS_ADDR); there is no authentication yet, so keep it on loopback unless the network is trusted")
 	publicURL := publicURLFlag(fl)
+	procFlags := defineProcessorFlags(fl)
 	if err := fl.Parse(args); err != nil {
 		return helpOrUsage(err)
+	}
+	procOpts, err := procFlags.options()
+	if err != nil {
+		fmt.Fprintf(stderr, "custos serve: %v\n", err)
+		return 2
 	}
 	if *dataDir == "" {
 		fmt.Fprintln(stderr, "custos serve: --data-dir or CUSTOS_DATA_DIR is required")
@@ -44,7 +50,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 2
 	}
-	srv, err := openServer(*dataDir, *publicURL, stderr)
+	// The context also stops the processor workers; runs it interrupts are
+	// queued again at the next start.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	srv, err := openServer(ctx, *dataDir, *publicURL, procOpts, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
@@ -54,8 +64,6 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	// Bind before announcing, so "listening" is only printed when it is true.
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -86,8 +94,9 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 
 // openServer opens the data directory, points all hooks at this binary and
 // reports workspaces whose main breaks the rules, for example after an edit
-// on disk (spec section 7); it serves them anyway.
-func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, error) {
+// on disk (spec section 7); it serves them anyway. It starts the processor
+// workers, which stop when ctx is cancelled.
+func openServer(ctx context.Context, dataDir, publicURL string, procOpts processorOptions, stderr io.Writer) (*server.Server, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -116,13 +125,19 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 	if err != nil {
 		return nil, err
 	}
+	svc, err := openRuns(st, procOpts)
+	if err != nil {
+		return nil, err
+	}
 	merge.Register(a, st, func(id string) {
 		if err := distribute.ReconcileWorkspace(st, id); err != nil {
 			fmt.Fprintf(stderr, "custos serve: workspace %s: %v\n", id, err)
 		}
-	}, nil)
+		svc.Scan(id) // a fork's main does not move through the store
+	}, rerunAfterMerge(svc, stderr))
 	srv := server.New(st)
 	startDistribution(st, a, srv, stderr)
+	startRuns(ctx, st, a, srv, svc)
 	srv.WithAPI(a.Handler())
 	return srv, nil
 }
