@@ -28,9 +28,13 @@ const maxBody = 64 << 20
 // was (the branch was already merged), or a failed fork. The caller uses it
 // to reconcile the workspace with the catalog right away, since such a
 // move does not go through a Git push (ruling 2.20).
-func Register(a *api.API, st *store.Store, onMainMoved func(id string)) {
+//
+// onRerun, which may be nil, is called after onMainMoved for a merge whose
+// Result.Rerun is not empty, with the target workspace id and those task
+// ids; the caller reruns their processors on the merged answers (§4.4).
+func Register(a *api.API, st *store.Store, onMainMoved func(id string), onRerun func(id string, tasks []string)) {
 	a.Handle("POST /api/workspaces/{id}/fork", func(w http.ResponseWriter, r *http.Request) { handleFork(st, onMainMoved, w, r) })
-	a.Handle("POST /api/workspaces/{id}/merge", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, onMainMoved, w, r) })
+	a.Handle("POST /api/workspaces/{id}/merge", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, onMainMoved, onRerun, w, r) })
 	a.Handle("GET /api/workspaces/{id}/branches", func(w http.ResponseWriter, r *http.Request) { handleBranches(st, w, r) })
 }
 
@@ -80,7 +84,7 @@ func handleFork(st *store.Store, onMainMoved func(id string), w http.ResponseWri
 	api.WriteJSON(w, http.StatusCreated, map[string]string{"id": body.ID})
 }
 
-func handleMerge(st *store.Store, onMainMoved func(id string), w http.ResponseWriter, r *http.Request) {
+func handleMerge(st *store.Store, onMainMoved func(id string), onRerun func(id string, tasks []string), w http.ResponseWriter, r *http.Request) {
 	author, err := api.Author(r)
 	if err != nil {
 		api.WriteJSON(w, http.StatusUnauthorized, errorBody{err.Error()})
@@ -114,6 +118,9 @@ func handleMerge(st *store.Store, onMainMoved func(id string), w http.ResponseWr
 	}
 	if onMainMoved != nil && result.Commit != before {
 		onMainMoved(id)
+	}
+	if onRerun != nil && len(result.Rerun) > 0 {
+		onRerun(id, result.Rerun)
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]string{"commit": result.Commit})
 }

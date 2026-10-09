@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -40,6 +41,7 @@ type Server struct {
 	mu              sync.Mutex
 	onCatalogPush   []func()
 	onWorkspacePush []func(id string)
+	onShutdown      []func()
 }
 
 // New returns a server for st.
@@ -71,6 +73,51 @@ func (s *Server) OnWorkspacePush(f func(id string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onWorkspacePush = append(s.onWorkspacePush, f)
+}
+
+// OnShutdown registers f to be called by WaitForShutdown. It lets a caller
+// of New attach background work it started, such as a run service's
+// workers, so whoever drives the process's graceful shutdown (cmd/custos's
+// runServe) can wait for that work to actually finish — not just be asked
+// to stop — without this package depending on the caller's type. f should
+// return once that work has stopped, or ctx (see WaitForShutdown) is done.
+func (s *Server) OnShutdown(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onShutdown = append(s.onShutdown, f)
+}
+
+// WaitForShutdown calls every OnShutdown callback (concurrently, since
+// each is expected to block on its own background work) and returns once
+// they have all returned, or ctx is done, whichever comes first. A
+// callback still running when ctx is done is abandoned: WaitForShutdown
+// returns anyway, so a slow or stuck background worker cannot hang the
+// process forever, at the cost of possibly leaving that work unfinished
+// (for example, a processor container not yet removed).
+func (s *Server) WaitForShutdown(ctx context.Context) {
+	s.mu.Lock()
+	fs := append([]func(){}, s.onShutdown...)
+	s.mu.Unlock()
+	if len(fs) == 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(fs))
+		for _, f := range fs {
+			go func(f func()) {
+				defer wg.Done()
+				f()
+			}(f)
+		}
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // Handler serves the repositories below /git through git http-backend, and

@@ -72,7 +72,7 @@ func wired(t *testing.T, exe string, log *lockedBuffer) (*store.Store, *server.S
 		if err := distribute.ReconcileWorkspace(st, id); err != nil {
 			fmt.Fprintf(log, "custos serve: workspace %s: %v\n", id, err)
 		}
-	})
+	}, nil)
 	srv := server.New(st)
 	startDistribution(st, a, srv, log)
 	srv.WithAPI(a.Handler())

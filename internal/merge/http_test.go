@@ -31,7 +31,7 @@ func handlerWithCallback(t *testing.T, e *env, onMainMoved func(id string)) http
 		t.Fatal(err)
 	}
 	a := api.New(e.st, bl)
-	Register(a, e.st, onMainMoved)
+	Register(a, e.st, onMainMoved, nil)
 	return a.Handler()
 }
 
@@ -238,5 +238,53 @@ func TestOnMainMovedCallback(t *testing.T) {
 
 	if want := []string{ws, forkID}; !slices.Equal(calls, want) {
 		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+// TestOnRerunCallback checks that a merge that kept main's side of
+// conflicting generated output calls onRerun with the producing tasks, and
+// that a merge without such conflicts does not.
+func TestOnRerunCallback(t *testing.T) {
+	e := setup(t)
+	doc := "documents/" + fixture.DocID + ".json"
+	docOn := func(side string) string {
+		return strings.Replace(fixture.DocumentFile, `"name":"provenance"`, `"name":"provenance-`+side+`"`, 1)
+	}
+	diverge(t, e,
+		map[string]string{doc: fixture.DocumentFile},
+		map[string]string{doc: docOn("main")},
+		map[string]string{doc: docOn("branch")})
+	commitFiles(t, e.st, ws, "refs/heads/clean", map[string]string{answerA: textAnswer(fixture.TaskA, "1.1.0", "clean")})
+
+	bl, err := blobs.Open(filepath.Join(e.st.DataDir(), "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := api.New(e.st, bl)
+	var order []string
+	var reruns [][]string
+	Register(a, e.st, func(id string) { order = append(order, "moved "+id) }, func(id string, tasks []string) {
+		order = append(order, "rerun "+id)
+		reruns = append(reruns, tasks)
+	})
+	h := a.Handler()
+
+	rec := call(h, "POST", "/api/workspaces/"+ws+"/merge", aliceHeader, `{"branch":"what-if"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge: %d %s", rec.Code, rec.Body)
+	}
+	if want := []string{"moved " + ws, "rerun " + ws}; !slices.Equal(order, want) {
+		t.Errorf("calls %v, want %v", order, want)
+	}
+	if len(reruns) != 1 || !slices.Equal(reruns[0], []string{fixture.TaskB}) {
+		t.Errorf("reruns %v", reruns)
+	}
+
+	rec = call(h, "POST", "/api/workspaces/"+ws+"/merge", aliceHeader, `{"branch":"clean"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clean merge: %d %s", rec.Code, rec.Body)
+	}
+	if len(reruns) != 1 {
+		t.Errorf("a merge without generated conflicts called onRerun: %v", reruns)
 	}
 }

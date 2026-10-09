@@ -1,14 +1,18 @@
 package merge
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/emeland-io/custos/internal/frontmatter"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/store"
+	"github.com/emeland-io/custos/internal/task"
+	"github.com/emeland-io/custos/internal/workspace"
 )
 
 // Sides of a Resolution.
@@ -44,6 +48,7 @@ type Conflict struct {
 type Result struct {
 	Commit    string     // merge commit on main when merged
 	Conflicts []Conflict // non-empty → nothing changed
+	Rerun     []string   // when merged: tasks whose output conflicted and must be run again, sorted
 }
 
 var branchRE = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
@@ -56,8 +61,11 @@ var beforeUpdate = func() {}
 // main with git merge-tree --write-tree and always records a merge commit,
 // authored by author, with main and the branch as parents.
 //
-// Every path git cannot merge needs a resolution in res; until all have
-// one, Merge changes nothing and Result.Conflicts lists the paths still
+// Conflicting generated tasks and documents are not reported: main's side
+// is kept, and Result.Rerun lists the tasks that produced them (on either
+// side), whose processors must run again on the merged answer (§4.4).
+// Every other path git cannot merge needs a resolution in res; until all
+// have one, Merge changes nothing and Result.Conflicts lists the paths still
 // without one. A resolution for a path that has no conflict, or a malformed
 // one, is ErrInvalid. The merged main is validated like any main update
 // (*store.RejectedError) and moved only if it is still where the merge
@@ -121,7 +129,7 @@ func Merge(st *store.Store, id, branch string, author gitrepo.Signature, res map
 	if err := st.SetRef(id, mainRef, commit, ours); err != nil {
 		return nil, err
 	}
-	return &Result{Commit: commit}, nil
+	return &Result{Commit: commit, Rerun: p.rerun()}, nil
 }
 
 // plan is how a merge settles its conflicts.
@@ -129,18 +137,23 @@ type plan struct {
 	changes   []gitrepo.Change // applied to the tree git merged
 	conflicts []Conflict       // paths still without a resolution
 	used      map[string]bool  // paths whose resolution was applied
+	producers map[string]bool  // tasks whose generated output conflicted
 }
 
 // planMerge settles custos.yaml field by field and every other path git
 // could not merge, by its resolution or as an open conflict.
 func planMerge(st *store.Store, repo *gitrepo.Repo, base, ours, theirs string, mt *gitrepo.MergeTreeResult, res map[string]Resolution) (*plan, error) {
-	p := &plan{used: map[string]bool{}}
+	p := &plan{used: map[string]bool{}, producers: map[string]bool{}}
 	if err := p.config(st, repo, base, ours, theirs, mt, res); err != nil {
 		return nil, err
 	}
 	for _, c := range mt.Conflicts {
 		if c.Path == configPath {
 			continue // settled by p.config
+		}
+		if k := kindOf(c.Path); k == KindGenerated || k == KindDocument {
+			p.keepMain(c.Path, c.Ours, c.Theirs)
+			continue
 		}
 		if err := p.settle(c.Path, c.Ours, c.Theirs, res); err != nil {
 			return nil, err
@@ -150,6 +163,50 @@ func planMerge(st *store.Store, repo *gitrepo.Repo, base, ours, theirs string, m
 		return nil, err
 	}
 	return p, nil
+}
+
+// keepMain settles a conflict on generated output (§4.4, replacing ruling
+// 2.10): main's version stays (or the file stays deleted when main deleted
+// it), and the tasks that produced either side are rerun after the merge.
+func (p *plan) keepMain(path string, ours, theirs []byte) {
+	if ours == nil {
+		p.changes = append(p.changes, gitrepo.Change{Path: path, Delete: true})
+	} else {
+		p.changes = append(p.changes, gitrepo.Change{Path: path, Data: ours})
+	}
+	for _, data := range [][]byte{ours, theirs} {
+		if id := producer(path, data); task.ValidID(id) {
+			p.producers[id] = true
+		}
+	}
+}
+
+// rerun returns the producing tasks collected by keepMain, sorted.
+func (p *plan) rerun() []string {
+	if len(p.producers) == 0 {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(p.producers))
+}
+
+// producer returns produced_by.task.id of a generated task or document
+// file, or "" when data is nil or cannot be read.
+func producer(path string, data []byte) string {
+	if data == nil {
+		return ""
+	}
+	if kindOf(path) == KindDocument {
+		var d workspace.Document
+		if json.Unmarshal(data, &d) != nil {
+			return ""
+		}
+		return d.ProducedBy.Task.ID
+	}
+	var m workspace.GeneratedMeta
+	if _, err := frontmatter.Decode(data, &m); err != nil {
+		return ""
+	}
+	return m.ProducedBy.Task.ID
 }
 
 // settle applies the resolution for path, or records an open conflict.

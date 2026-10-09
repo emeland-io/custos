@@ -11,12 +11,15 @@ import (
 const usage = `custos manages a task catalog and the workspaces that answer its tasks.
 
 Usage:
-  custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
+  custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL] [--container-runtime CMD]
+               [--secrets-dir DIR] [--processor-memory SIZE] [--processor-workers N]
+               [--max-generation-depth N] [--trusted-keys DIR]
   custos validate [--against REV] [DIR]
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
   custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID
   custos clone URL DIR
   custos push [--dir DIR] [--author "NAME <EMAIL>"] [REMOTE [GIT-PUSH-ARGS...]]
+  custos processor test IMAGE --answer FILE [--task FILE] [--previous DIR] [flags]
 
 Run "custos COMMAND -h" for the flags of a command.
 `
@@ -47,6 +50,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runClone(args[1:], stdout, stderr)
 	case "push":
 		return runPush(args[1:], stdout, stderr)
+	case "processor":
+		return runProcessor(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0

@@ -52,8 +52,9 @@ type Store struct {
 	exe       string // the custos binary the hooks run
 	publicURL string // without trailing slash
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex // by "catalog" or workspace id
+	mu     sync.Mutex
+	locks  map[string]*sync.Mutex // by "catalog" or workspace id
+	onMain []func(id string)      // see OnMainMoved
 }
 
 // New returns a store for the data directory without touching it. exe is the
@@ -170,7 +171,9 @@ func (s *Store) WorkspaceIDs() ([]string, error) {
 // CreateWorkspace creates the bare repository with its hook and an initial
 // commit on main whose custos.yaml pins the current catalog main (ruling 2.13).
 // ErrExists if it exists; error if the catalog has no main. Only the new
-// repository's hook is installed (ruling 1.8).
+// repository's hook is installed (ruling 1.8). A successful call moves main
+// from nothing to the initial commit and calls the OnMainMoved callbacks
+// after the workspace's lock is released.
 func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error) {
 	if !task.ValidID(id) {
 		return &RejectedError{Problems: []problem.Problem{{
@@ -178,6 +181,22 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 		}}}
 	}
 	unlock := s.Lock(id)
+	// created is flipped to true only once finishCreateWorkspace has
+	// genuinely succeeded, not merely read from the named return err: err
+	// is reassigned several times on the way here (catalogMain,
+	// CreateWorkspaceRepo), so gating on "err == nil" would wrongly fire
+	// mainMoved if a panic struck after one of those earlier successes but
+	// before the real write. Gating on this dedicated, default-false local
+	// instead keeps the trigger fail-closed under a panic, matching
+	// UpdateWorkspaceAndThen and SetRef below.
+	created := false
+	// Registered before the unlock defer, so by LIFO ordering it runs after
+	// unlock has already released the lock.
+	defer func() {
+		if created {
+			s.mainMoved(id)
+		}
+	}()
 	defer unlock()
 	pin, err := s.catalogMain()
 	if err != nil {
@@ -187,8 +206,20 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 	if err != nil {
 		return err
 	}
-	return s.finishCreateWorkspace(repo, id, author, pin)
+	if testPanicBeforeFinishCreateWorkspace != nil {
+		testPanicBeforeFinishCreateWorkspace()
+	}
+	err = s.finishCreateWorkspace(repo, id, author, pin)
+	created = err == nil
+	return err
 }
+
+// testPanicBeforeFinishCreateWorkspace, when non-nil, is called by
+// CreateWorkspace just before the call that actually writes the initial
+// commit and moves main. Only this package's tests set it, to verify that a
+// panic on this path still leaves the workspace's lock released and does
+// not fire the OnMainMoved callbacks (see TestCreateWorkspacePanicDoesNotFireOnMainMoved).
+var testPanicBeforeFinishCreateWorkspace func()
 
 // finishCreateWorkspace commits custos.yaml pinned to pin on repo's empty
 // main. The repository is removed on failure, except when the final
@@ -264,6 +295,32 @@ func (s *Store) Lock(repo string) func() {
 	s.mu.Unlock()
 	m.Lock()
 	return m.Unlock
+}
+
+// OnMainMoved registers f to be called with a workspace's id after
+// UpdateWorkspace, SetRef or CreateWorkspace moved that workspace's main to
+// a genuinely different commit. f runs synchronously in the writer's
+// goroutine, after the workspace's lock has already been released, so it
+// may itself write to the store (including calling UpdateWorkspace) without
+// deadlocking; it should return quickly. It is not called for writes to
+// other branches, for writes that change nothing, or for writes that fail
+// (validation, lost compare-and-swap). Pushes do not go through the store;
+// see server.OnWorkspacePush.
+func (s *Store) OnMainMoved(f func(id string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onMain = append(s.onMain, f)
+}
+
+// mainMoved calls the OnMainMoved callbacks. The caller holds no lock on the
+// workspace.
+func (s *Store) mainMoved(id string) {
+	s.mu.Lock()
+	fs := slices.Clone(s.onMain)
+	s.mu.Unlock()
+	for _, f := range fs {
+		f(id)
+	}
 }
 
 // catalogMain returns the commit of the catalog's main.
