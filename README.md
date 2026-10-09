@@ -510,7 +510,7 @@ curl -X POST -H "$A" $W/runs/<run-id>/retry      # failed runs only
 | `POST /api/workspaces/{id}/runs/{run}/retry` | run a failed run again; `202` with the new record, `409` for runs that did not fail |
 | `GET /api/workspaces/{id}/processor-proposals` | open output proposals with their items |
 | `GET /api/workspaces/{id}/processor-proposals/{task}` | the open proposal of one task |
-| `POST /api/workspaces/{id}/processor-proposals/{task}/accept` | body `{"items"?: ["task:<match_key>", "document:<match_key>"]}`; answers `{"commit"}`, plus `warning` when the commit was made but the proposal branch could not be deleted or a cascade proposal not opened |
+| `POST /api/workspaces/{id}/processor-proposals/{task}/accept` | body `{"items"?: ["task:<match_key>", "document:<match_key>"]}`; answers `{"commit"}`, plus `warning` when the commit was made but the proposal branch could not be deleted or a cascade proposal not opened; `409` when the proposal was replaced (a newer run, or a cascade) while the call was in flight — not retried, since the selection was made against items that may no longer be there; fetch the proposal again and decide once more |
 | `POST /api/workspaces/{id}/processor-proposals/{task}/reject` | delete the proposal; `204` |
 | `POST /api/processors/{name}/dry-run` | body `{"image": "<ref>@sha256:<hex>"}`; `202 {"id"}` |
 | `GET /api/dry-runs/{id}` | `state`, `runs`, `failed`, `proposals`, `workspaces` and up to five `samples` |
