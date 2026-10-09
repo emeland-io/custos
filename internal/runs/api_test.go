@@ -2,6 +2,7 @@ package runs
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/proctest"
+	"github.com/emeland-io/custos/internal/proposal"
 )
 
 const aliceHeader = "Alice Example <alice@example.org>"
@@ -148,6 +150,41 @@ func TestProcessorProposalEndpoints(t *testing.T) {
 	wantStatus(t, call(h, "POST", base+"/"+fixture.TaskB+"/reject", "", ""), http.StatusUnauthorized)
 	wantStatus(t, call(h, "POST", base+"/"+fixture.TaskB+"/reject", aliceHeader, ""), http.StatusNoContent)
 	wantStatus(t, call(h, "GET", base+"/"+fixture.TaskB, "", ""), http.StatusNotFound)
+}
+
+// TestAcceptEndpointReportsWarningOnPostLandingFailure drives the accept
+// endpoint's documented "landed, but a later step failed" contract (see the
+// comment above api.go's accept handler): when proposal.Accept's commit
+// lands but the post-landing step (deleting the proposal branch / opening a
+// cascade) then fails, the response must still be 200 with BOTH a non-empty
+// "commit" and a non-empty "warning" — never a 500 that would hide a commit
+// that actually landed. Forces that failure deterministically via
+// proposal.SetAfterAcceptForTest, the REST-level use of the same seam
+// internal/proposal's own accept_test.go uses at the package level.
+func TestAcceptEndpointReportsWarningOnPostLandingFailure(t *testing.T) {
+	gen := proctest.Image(t, "generate")
+	e := newEnv(t, registry([]proc{{name: "gen", image: gen}}, map[string]string{fixture.TaskB: "gen"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("task host Host one\ndoc slsa web-01\n")})
+	e.svc.Wait()
+	h := handler(e)
+	base := "/api/workspaces/" + ws + "/processor-proposals"
+
+	boom := errors.New("simulated failure of the post-landing step")
+	proposal.SetAfterAcceptForTest(func() error { return boom })
+	defer proposal.SetAfterAcceptForTest(nil)
+
+	rec := call(h, "POST", base+"/"+fixture.TaskB+"/accept", aliceHeader, "")
+	wantStatus(t, rec, http.StatusOK)
+	var acc map[string]string
+	decode(t, rec, &acc)
+	repo, _ := e.st.WorkspaceRepo(ws)
+	main, _, _ := repo.ResolveRef("refs/heads/main")
+	if acc["commit"] == "" || acc["commit"] != main {
+		t.Errorf("accept %v, main %s; want the landed commit even though the post-landing step failed", acc, main)
+	}
+	if acc["warning"] == "" || !strings.Contains(acc["warning"], boom.Error()) {
+		t.Errorf("accept %v, want a populated warning containing %q", acc, boom.Error())
+	}
 }
 
 func TestDryRunEndpoints(t *testing.T) {

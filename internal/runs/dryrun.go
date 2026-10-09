@@ -75,12 +75,14 @@ func (s *Service) DryRun(name, image string) (string, error) {
 	s.mu.Lock()
 	s.dry[id] = job
 	s.busy++
+	s.inFlight++
 	ctx := s.ctx
 	s.mu.Unlock()
 	go func() {
 		s.dryRun(ctx, job, name, image)
 		s.mu.Lock()
 		s.busy--
+		s.inFlight--
 		s.cond.Broadcast()
 		s.mu.Unlock()
 	}()

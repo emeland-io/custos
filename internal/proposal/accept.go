@@ -24,6 +24,28 @@ var errReplaced = errors.New("the proposal was replaced while being accepted")
 // land a concurrent change in exactly that window; it is nil otherwise.
 var beforeAcceptLock func()
 
+// afterAccept, when not nil, is called by Accept's then callback instead of
+// the post-landing step (deleting the proposal branch and opening cascades)
+// once the main-branch commit has already landed. Tests use it to force
+// that step to fail deterministically, so the documented "landed, but a
+// later step failed" contract (commit != "" together with err != nil; see
+// rulings 3.42/3.60) is actually exercised: the commit above is already on
+// main by the time this runs, and whatever error afterAccept returns is
+// what Accept reports alongside it. nil otherwise, in which case the normal
+// deleteBranch/openCascades runs as before.
+var afterAccept func() error
+
+// SetAfterAcceptForTest sets (or, with nil, clears) the afterAccept hook
+// above. It exists only so that another package's tests — internal/runs's
+// REST-level accept tests, which drive the same "landed, but a later step
+// failed" contract through the HTTP handler rather than by calling Accept
+// directly — can reach afterAccept despite it being unexported: an
+// _test.go file in this package is invisible to another package's tests,
+// so a plain test-only variable is not enough once the seam needs to be
+// shared across a package boundary. It does nothing by itself in
+// production; afterAccept stays nil unless a test calls this.
+func SetAfterAcceptForTest(f func() error) { afterAccept = f }
+
 // Accept applies the selected items ("task:<match_key>" / "document:<match_key>";
 // nil = all that are not Unchanged) of the open proposal of taskID to the
 // current main in one commit by author (validated, compare-and-swap; when a
@@ -103,6 +125,9 @@ func Accept(st *store.Store, wsID, taskID string, selected []string, author gitr
 			},
 			func(repo *gitrepo.Repo, oid string) error {
 				landed = true
+				if afterAccept != nil {
+					return afterAccept()
+				}
 				return errors.Join(deleteBranch(repo, p), openCascades(repo, oid, removed))
 			})
 		// Retry only a compare-and-swap on main lost to a push: never once

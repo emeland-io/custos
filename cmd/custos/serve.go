@@ -76,15 +76,18 @@ const shutdownTimeout = 10 * time.Second
 // serveUntilDone binds addr, serves h, and blocks until either the HTTP
 // server fails or ctx is cancelled (see the comment on runServe's ctx).
 // On cancellation it shuts the HTTP server down and waits for srv's
-// OnShutdown callbacks — in particular the run service's Wait, registered
-// by startRuns — concurrently, against one shared deadline: a run
-// interrupted by ctx's cancellation still needs to kill and remove its
+// OnShutdown callbacks — in particular the run service's WaitInFlight,
+// registered by startRuns — concurrently, against one shared deadline: a
+// run interrupted by ctx's cancellation still needs to kill and remove its
 // container and finish updating its record before the process may exit,
 // or the container is left behind as orphaned and the run, left "running"
-// on disk, is executed again at the next start regardless. If that
-// deadline passes before the background work finishes, serveUntilDone
-// logs a warning and returns anyway, rather than hang the process
-// forever over a stuck worker or container runtime.
+// on disk, is executed again at the next start regardless. WaitInFlight
+// only waits for work actually in progress, not for the whole queue to
+// drain, so an ordinary backlog beyond the worker count does not by
+// itself hold shutdown to the full deadline below. If that deadline does
+// pass before the background work finishes, serveUntilDone logs a
+// warning and returns anyway, rather than hang the process forever over a
+// stuck worker or container runtime.
 func serveUntilDone(ctx context.Context, srv *server.Server, h http.Handler, addr, dataDir string, stdout, stderr io.Writer) int {
 	// Bind before announcing, so "listening" is only printed when it is true.
 	ln, err := net.Listen("tcp", addr)

@@ -335,6 +335,76 @@ func TestRestartAfterRealCancellation(t *testing.T) {
 	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
 }
 
+// TestWaitInFlightIgnoresQueueBacklog is a fast, white-box check of
+// WaitInFlight's exact semantics (see its comment in service.go),
+// complementing the slower, container-based regression test in
+// cmd/custos/shutdown_test.go (TestServeShutdownDoesNotWaitForQueuedBacklog):
+// it must return as soon as in-flight work finishes, even while the queue
+// — which Wait, unlike WaitInFlight, still blocks on — holds a backlog
+// that nothing in this test ever picks up (no worker is running). It
+// manipulates the Service's internal fields directly, under mu, exactly
+// the way worker and DryRun themselves do.
+func TestWaitInFlightIgnoresQueueBacklog(t *testing.T) {
+	svc := newStoppedEnv(t, registry([]proc{{name: "scan", image: "unused"}}, map[string]string{fixture.TaskB: "scan"}), Config{}).svc
+
+	// A queue backlog Wait must block on but WaitInFlight must not: no
+	// worker is running in this test, so nothing will ever pop it.
+	svc.mu.Lock()
+	svc.queue = append(svc.queue, &Record{ID: "backlog"})
+	svc.mu.Unlock()
+
+	waitDone := make(chan struct{})
+	go func() { svc.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned with a non-empty queue and nothing to drain it")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Mark one unit of work in flight, the way worker/DryRun do before
+	// unlocking; WaitInFlight must block on this, same as Wait would.
+	svc.mu.Lock()
+	svc.inFlight = 1
+	svc.mu.Unlock()
+	inFlightDone := make(chan struct{})
+	go func() { svc.WaitInFlight(); close(inFlightDone) }()
+	select {
+	case <-inFlightDone:
+		t.Fatal("WaitInFlight returned while in-flight work was still marked in progress")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Finish the in-flight work, the way worker/DryRun do after
+	// unlocking: WaitInFlight must return even though the queue backlog
+	// above is untouched and Wait is still blocked on it.
+	svc.mu.Lock()
+	svc.inFlight = 0
+	svc.cond.Broadcast()
+	svc.mu.Unlock()
+	select {
+	case <-inFlightDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitInFlight did not return once in-flight work dropped to zero, even though the queue backlog is unrelated to it")
+	}
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned even though the queue backlog it waits on is still there")
+	default:
+	}
+
+	// Clean up: drain the queue so Wait returns and its goroutine does
+	// not leak past the test.
+	svc.mu.Lock()
+	svc.queue = nil
+	svc.cond.Broadcast()
+	svc.mu.Unlock()
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return once the queue was drained")
+	}
+}
+
 func TestRerunIgnoresKey(t *testing.T) {
 	echo := proctest.Image(t, "echo")
 	e := newEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})

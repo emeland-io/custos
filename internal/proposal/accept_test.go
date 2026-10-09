@@ -54,6 +54,33 @@ func TestAcceptAll(t *testing.T) {
 	}
 }
 
+// TestAcceptReportsCommitWithPostLandingFailure exercises the documented
+// "landed, but a later step failed" contract (rulings 3.42/3.60): when the
+// main-branch commit lands but the post-landing step (deleting the proposal
+// branch / opening a cascade) then fails, Accept must return the commit that
+// actually landed together with the error — never a bare failure that
+// discards the commit, and never a success that drops the warning. Forces
+// that step to fail deterministically via afterAccept, the test-only seam
+// added alongside beforeAcceptLock.
+func TestAcceptReportsCommitWithPostLandingFailure(t *testing.T) {
+	st := newStore(t)
+	propose(t, st, fixture.TaskB, digest1, twoTasksAndDoc)
+	boom := errors.New("simulated failure of the post-landing step")
+	afterAccept = func() error { return boom }
+	defer func() { afterAccept = nil }()
+
+	commit, err := Accept(st, ws, fixture.TaskB, nil, person)
+	if commit == "" {
+		t.Fatalf("commit %q, err %v; want the landed commit even though the post-landing step failed", commit, err)
+	}
+	if err == nil || !errors.Is(err, boom) {
+		t.Errorf("err %v, want it to wrap %v", err, boom)
+	}
+	if got := mainOID(t, st); commit != got {
+		t.Errorf("commit %s, main is actually at %s; Accept must report the commit that genuinely landed", commit, got)
+	}
+}
+
 func TestAcceptSome(t *testing.T) {
 	st := newStore(t)
 	propose(t, st, fixture.TaskB, digest1, twoTasksAndDoc)

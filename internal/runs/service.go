@@ -60,6 +60,14 @@ type Service struct {
 	scans     map[string]bool    // pending scans: workspace id → only ScanAll asked for it
 	busy      int                // scans, runs and dry runs in progress
 	dry       map[string]*dryRun // dry-run jobs by id; never persisted (see dryrun.go)
+
+	// inFlight counts runs and dry runs that have actually been taken off
+	// the queue (or started, for a dry run) and have not finished yet —
+	// unlike busy, it excludes scans, so WaitInFlight can block on exactly
+	// this and nothing else. Incremented at the same points worker and
+	// DryRun increment busy, decremented at the same points they decrement
+	// it; see WaitInFlight.
+	inFlight int
 }
 
 // New loads the run records below <data-dir>/runs. Records that were
@@ -208,6 +216,30 @@ func (s *Service) Wait() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for len(s.scans) > 0 || len(s.queue) > 0 || s.busy > 0 {
+		s.cond.Wait()
+	}
+}
+
+// WaitInFlight blocks until every run or dry run actually in progress — off
+// the queue (or dry-run goroutine started) and not yet finished — has
+// finished, without waiting for the queue or pending scans to drain.
+// Unlike Wait, it is not a "queue fully empty" barrier: once the ctx
+// passed to Start is cancelled, worker stops pulling new work from the
+// queue (it checks ctx.Err() before every nextReady), so anything still
+// queued at that point stays queued for the rest of this process's
+// lifetime, and waiting for the queue to empty too would block for no
+// reason the caller can do anything about. serve's graceful shutdown uses
+// this instead of Wait, so it returns as soon as whatever container is
+// actually running has been killed and removed — not after the full
+// shutdown timeout, regardless of how large a backlog the queue holds
+// (Important finding: shutdown waited the full timeout and logged a false
+// "did not stop" warning whenever there was any queue backlog). A record
+// left queued this way is already durably saved as Queued before this is
+// ever called, and the next Service picks it up, same as today.
+func (s *Service) WaitInFlight() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.inFlight > 0 {
 		s.cond.Wait()
 	}
 }
@@ -384,6 +416,7 @@ func (s *Service) worker(ctx context.Context) {
 		}
 		s.starting[r] = true
 		s.busy++
+		s.inFlight++
 		s.mu.Unlock()
 
 		s.execute(ctx, r)
@@ -391,6 +424,7 @@ func (s *Service) worker(ctx context.Context) {
 		s.mu.Lock()
 		delete(s.executing, pathKey{r.Workspace, r.AnswerPath})
 		s.busy--
+		s.inFlight--
 		s.cond.Broadcast()
 		s.mu.Unlock()
 	}

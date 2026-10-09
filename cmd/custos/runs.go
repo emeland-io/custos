@@ -114,17 +114,22 @@ func openRuns(st *store.Store, o processorOptions) (*runs.Service, error) {
 // while the server was down. Call it after startDistribution, so the
 // start-up scan sees the pins distribution moved.
 //
-// It also registers svc.Wait with srv.OnShutdown, so that whoever drives
-// graceful shutdown (runServe's serveUntilDone) can wait for the workers
-// to actually finish, not just be told to stop: a worker killed mid-run by
-// ctx's cancellation still removes its container and finishes updating
-// the record on disk before Wait returns, and the process must not exit
-// before that happens or the container is left behind as orphaned.
+// It also registers svc.WaitInFlight with srv.OnShutdown, so that whoever
+// drives graceful shutdown (runServe's serveUntilDone) can wait for the
+// workers to actually finish, not just be told to stop: a worker killed
+// mid-run by ctx's cancellation still removes its container and finishes
+// updating the record on disk before WaitInFlight returns, and the
+// process must not exit before that happens or the container is left
+// behind as orphaned. WaitInFlight (unlike svc.Wait, which tests use and
+// which waits for the whole queue to drain) only waits for work actually
+// in progress, so shutdown is not held to the full shutdown timeout by an
+// ordinary backlog of still-queued, never-started work that ctx's
+// cancellation already keeps workers from ever picking up.
 func startRuns(ctx context.Context, st *store.Store, a *api.API, srv *server.Server, svc *runs.Service) {
 	runs.Register(a, svc)
 	st.OnMainMoved(svc.Scan)
 	srv.OnWorkspacePush(svc.Scan)
-	srv.OnShutdown(svc.Wait)
+	srv.OnShutdown(svc.WaitInFlight)
 	svc.Start(ctx)
 	svc.ScanAll()
 }
