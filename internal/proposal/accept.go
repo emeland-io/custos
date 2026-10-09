@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"slices"
+	"testing"
 
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/match"
@@ -42,9 +43,17 @@ var afterAccept func() error
 // directly — can reach afterAccept despite it being unexported: an
 // _test.go file in this package is invisible to another package's tests,
 // so a plain test-only variable is not enough once the seam needs to be
-// shared across a package boundary. It does nothing by itself in
-// production; afterAccept stays nil unless a test calls this.
-func SetAfterAcceptForTest(f func() error) { afterAccept = f }
+// shared across a package boundary. Since that leaves it as ordinary,
+// always-compiled exported API with no other guard, it panics outside a
+// test binary (testing.Testing() is false there) rather than silently let
+// a stray production call skip Accept's post-landing step (branch delete
+// / cascade open) on every call from then on.
+func SetAfterAcceptForTest(f func() error) {
+	if !testing.Testing() {
+		panic("proposal: SetAfterAcceptForTest called outside a test binary")
+	}
+	afterAccept = f
+}
 
 // Accept applies the selected items ("task:<match_key>" / "document:<match_key>";
 // nil = all that are not Unchanged) of the open proposal of taskID to the
