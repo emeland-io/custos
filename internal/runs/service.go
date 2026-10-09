@@ -54,11 +54,12 @@ type Service struct {
 	// is not mistaken for already covered (see TestRevertAfterCoalescing).
 	keys map[string]int
 
-	queue     []*Record        // queued records, oldest first
-	starting  map[*Record]bool // taken from the queue, main not read yet
-	executing map[pathKey]bool // answers with a run actually executing (past prepare); see nextReady
-	scans     map[string]bool  // pending scans: workspace id → only ScanAll asked for it
-	busy      int              // scans, runs and dry runs in progress
+	queue     []*Record          // queued records, oldest first
+	starting  map[*Record]bool   // taken from the queue, main not read yet
+	executing map[pathKey]bool   // answers with a run actually executing (past prepare); see nextReady
+	scans     map[string]bool    // pending scans: workspace id → only ScanAll asked for it
+	busy      int                // scans, runs and dry runs in progress
+	dry       map[string]*dryRun // dry-run jobs by id; never persisted (see dryrun.go)
 }
 
 // New loads the run records below <data-dir>/runs. Records that were
@@ -82,6 +83,7 @@ func New(st *store.Store, bl *blobs.Store, rn *runner.Runner, v attest.Verifier,
 		scans:     map[string]bool{},
 		starting:  map[*Record]bool{},
 		executing: map[pathKey]bool{},
+		dry:       map[string]*dryRun{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 	rs, err := s.files.load()
