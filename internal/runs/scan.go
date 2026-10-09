@@ -113,7 +113,7 @@ func (s *Service) scan(wsID string, startUp bool) error {
 			continue
 		}
 		key := runKey(wsID, path, snap.blobs[path], b.digest)
-		if s.keys[key] || s.queuedFor(wsID, path) != nil {
+		if s.hasKey(key) || s.queuedFor(wsID, path) != nil {
 			continue
 		}
 		r := s.newRecord(wsID, snap, a, b)

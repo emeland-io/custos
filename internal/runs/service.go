@@ -17,6 +17,11 @@ import (
 	"github.com/emeland-io/custos/internal/store"
 )
 
+// pathKey identifies one answer of one workspace, independent of its
+// content or binding: the unit that execution is serialized on (see
+// Service.executing).
+type pathKey struct{ ws, path string }
+
 // Service owns the run queue and the run records of one server.
 type Service struct {
 	st    *store.Store
@@ -34,16 +39,26 @@ type Service struct {
 	// run that read the same main, or the run reads main after the scan.
 	snapMu sync.Mutex
 
-	mu       sync.Mutex
-	cond     *sync.Cond      // signalled whenever the fields below change
-	ctx      context.Context // from Start; Background before
-	started  bool
-	records  map[string]map[string]*Record // workspace id → run id → record
-	keys     map[string]bool               // keys that have a record
-	queue    []*Record                     // queued records, oldest first
-	starting map[*Record]bool              // taken from the queue, main not read yet
-	scans    map[string]bool               // pending scans: workspace id → only ScanAll asked for it
-	busy     int                           // scans, runs and dry runs in progress
+	mu      sync.Mutex
+	cond    *sync.Cond      // signalled whenever the fields below change
+	ctx     context.Context // from Start; Background before
+	started bool
+	records map[string]map[string]*Record // workspace id → run id → record
+
+	// keys counts, for each run key, how many records currently carry it
+	// in their Key field (see addKey/removeKey/hasKey). A key is only
+	// added once a run has actually bound to it (at enqueue, with the
+	// key intended at scan time, and rebound in prepare if main moved on
+	// again before the run started) — never left behind under a key a
+	// record no longer carries, so a later revert to that exact content
+	// is not mistaken for already covered (see TestRevertAfterCoalescing).
+	keys map[string]int
+
+	queue     []*Record        // queued records, oldest first
+	starting  map[*Record]bool // taken from the queue, main not read yet
+	executing map[pathKey]bool // answers with a run actually executing (past prepare); see nextReady
+	scans     map[string]bool  // pending scans: workspace id → only ScanAll asked for it
+	busy      int              // scans, runs and dry runs in progress
 }
 
 // New loads the run records below <data-dir>/runs. Records that were
@@ -58,14 +73,15 @@ func New(st *store.Store, bl *blobs.Store, rn *runner.Runner, v attest.Verifier,
 	}
 	s := &Service{
 		st: st, bl: bl, rn: rn, v: v, cfg: cfg,
-		files:    files{dir: filepath.Join(st.DataDir(), "runs")},
-		newID:    uuid.NewString,
-		now:      func() time.Time { return time.Now().UTC() },
-		ctx:      context.Background(),
-		records:  map[string]map[string]*Record{},
-		keys:     map[string]bool{},
-		scans:    map[string]bool{},
-		starting: map[*Record]bool{},
+		files:     files{dir: filepath.Join(st.DataDir(), "runs")},
+		newID:     uuid.NewString,
+		now:       func() time.Time { return time.Now().UTC() },
+		ctx:       context.Background(),
+		records:   map[string]map[string]*Record{},
+		keys:      map[string]int{},
+		scans:     map[string]bool{},
+		starting:  map[*Record]bool{},
+		executing: map[pathKey]bool{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 	rs, err := s.files.load()
@@ -86,7 +102,9 @@ func New(st *store.Store, bl *blobs.Store, rn *runner.Runner, v attest.Verifier,
 	return s, nil
 }
 
-// add indexes a record. The caller holds mu (or owns s exclusively).
+// add indexes a record and registers the key it currently carries (its
+// contribution to that key's refcount; see addKey). The caller holds mu
+// (or owns s exclusively, as New does before starting).
 func (s *Service) add(r *Record) {
 	m := s.records[r.Workspace]
 	if m == nil {
@@ -94,9 +112,40 @@ func (s *Service) add(r *Record) {
 		s.records[r.Workspace] = m
 	}
 	m[r.ID] = r
-	if r.Key != "" {
-		s.keys[r.Key] = true
+	s.addKey(r.Key)
+}
+
+// addKey registers one more record's claim on key (a no-op for ""). The
+// caller holds mu.
+func (s *Service) addKey(key string) {
+	if key != "" {
+		s.keys[key]++
 	}
+}
+
+// removeKey releases one record's claim on key (a no-op for ""). The
+// caller holds mu.
+func (s *Service) removeKey(key string) {
+	if key == "" {
+		return
+	}
+	if s.keys[key] <= 1 {
+		delete(s.keys, key)
+	} else {
+		s.keys[key]--
+	}
+}
+
+// hasKey reports whether any record currently carries key in its Key
+// field. The caller holds mu.
+func (s *Service) hasKey(key string) bool { return s.keys[key] > 0 }
+
+// rekey moves one record's claim from oldKey to newKey (same key: a
+// no-op net of the refcount, used so prepare can call it unconditionally).
+// The caller holds mu.
+func (s *Service) rekey(oldKey, newKey string) {
+	s.removeKey(oldKey)
+	s.addKey(newKey)
 }
 
 // Start starts the scanner and cfg.Workers workers and returns at once.
@@ -263,6 +312,20 @@ func (s *Service) latestFor(wsID, path string) *Record {
 	return latest
 }
 
+// terminalFor returns a copy of a terminal (Succeeded or Failed) record of
+// workspace wsID whose Key is key, other than excludeID, or nil if there is
+// none. Used by prepare to avoid running a processor again for a key that
+// already has a result (see Important finding I1); the caller holds mu.
+func (s *Service) terminalFor(wsID, key, excludeID string) *Record {
+	for _, r := range s.records[wsID] {
+		if r.ID != excludeID && r.Key == key && (r.State == Succeeded || r.State == Failed) {
+			out := *r
+			return &out
+		}
+	}
+	return nil
+}
+
 // scanner serves Scan and ScanAll requests one workspace at a time.
 func (s *Service) scanner(ctx context.Context) {
 	for {
@@ -293,19 +356,30 @@ func (s *Service) scanner(ctx context.Context) {
 	}
 }
 
-// worker executes queued runs until ctx is cancelled.
+// worker executes queued runs until ctx is cancelled. It only ever starts
+// executing one run per answer path at a time (see nextReady), so an older
+// run's late-finishing proposal write can never land after, and overwrite,
+// a newer run's — the newer run simply cannot start until the older one
+// has fully finished (Critical finding C2).
 func (s *Service) worker(ctx context.Context) {
 	for {
 		s.mu.Lock()
-		for len(s.queue) == 0 && ctx.Err() == nil {
+		var r *Record
+		for {
+			// ctx is checked before every call to nextReady, never
+			// after: nextReady mutates s.queue/s.executing, and checking
+			// ctx only afterward could pop and mark a record executing
+			// and then discard it on this same iteration without ever
+			// reaching the cleanup below, leaking that mark forever.
+			if ctx.Err() != nil {
+				s.mu.Unlock()
+				return
+			}
+			if r = s.nextReady(); r != nil {
+				break
+			}
 			s.cond.Wait()
 		}
-		if ctx.Err() != nil {
-			s.mu.Unlock()
-			return
-		}
-		r := s.queue[0]
-		s.queue = s.queue[1:]
 		s.starting[r] = true
 		s.busy++
 		s.mu.Unlock()
@@ -313,19 +387,36 @@ func (s *Service) worker(ctx context.Context) {
 		s.execute(ctx, r)
 
 		s.mu.Lock()
+		delete(s.executing, pathKey{r.Workspace, r.AnswerPath})
 		s.busy--
 		s.cond.Broadcast()
 		s.mu.Unlock()
 	}
 }
 
-// update changes r under mu and saves it.
+// nextReady removes and returns the first queued record whose answer path
+// has no run currently executing, and marks that path executing; nil when
+// every queued record's path is already covered by a run in progress (or
+// the queue is empty) — such a record is left in the queue, where
+// queuedFor still reports it as pending. The caller holds mu.
+func (s *Service) nextReady() *Record {
+	for i, r := range s.queue {
+		k := pathKey{r.Workspace, r.AnswerPath}
+		if !s.executing[k] {
+			s.queue = append(s.queue[:i:i], s.queue[i+1:]...)
+			s.executing[k] = true
+			return r
+		}
+	}
+	return nil
+}
+
+// update changes r under mu and saves it. change is responsible for any
+// key bookkeeping its edit requires (see prepare, the only caller that
+// rewrites r.Key).
 func (s *Service) update(r *Record, change func(r *Record)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	change(r)
-	if r.Key != "" {
-		s.keys[r.Key] = true
-	}
 	return s.files.save(r)
 }

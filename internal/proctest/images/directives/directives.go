@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StatementType and PredicateType are the in-toto fields of a doc.
@@ -157,6 +158,13 @@ func Main(name string, wrap func(statement []byte) (json.RawMessage, error)) {
 				fail("%s: %q is not an exit code", at, f[1])
 			}
 			os.Exit(code)
+		case "sleep":
+			need(2)
+			d, err := time.ParseDuration(f[1])
+			if err != nil {
+				fail("%s: %q is not a duration", at, f[1])
+			}
+			time.Sleep(d)
 		default:
 			fail("%s: unknown directive", at)
 		}

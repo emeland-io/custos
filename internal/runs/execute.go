@@ -42,9 +42,20 @@ func (s *Service) execute(ctx context.Context, r *Record) {
 // perform runs r against main and returns the outcome, the proposal branch
 // (when proposed) and the processor's log.
 func (s *Service) perform(ctx context.Context, r *Record) (Outcome, string, []byte, error) {
-	snap, a, b, err := s.prepare(r)
+	snap, a, b, existing, err := s.prepare(r)
 	if err != nil {
 		return None, "", nil, err
+	}
+	// The key this run bound to already has a terminal result from
+	// another record, and this run was not explicitly asked to redo the
+	// work (retry/merge are) — redundant, so report that result instead
+	// of running the processor again (Important finding I1).
+	if existing != nil {
+		if existing.State == Failed {
+			return None, "", nil, fmt.Errorf("skipped: run %s already failed with the exact same answer and processor: %s",
+				existing.ID, existing.Error)
+		}
+		return Unchanged, "", nil, nil
 	}
 	ref, digest, err := s.rn.Resolve(ctx, b.proc.Image)
 	if err != nil {
@@ -66,8 +77,18 @@ func (s *Service) perform(ctx context.Context, r *Record) (Outcome, string, []by
 }
 
 // prepare reads main for run r and records what the run uses, which may
-// be newer than what was queued: answer, processor, digest and key.
-func (s *Service) prepare(r *Record) (*snapshot, *workspace.Answer, binding, error) {
+// be newer than what was queued: answer, processor, digest and key. Its
+// claim on the key it was queued with (added when it was enqueued) moves
+// to the key it actually binds to here, so a key is never left registered
+// under a record that no longer carries it (Critical finding C1) and a
+// revert to content this exact answer path held earlier, after being
+// coalesced away before it ever ran, is not mistaken for already covered.
+//
+// existing is a terminal (Succeeded or Failed) record other than r that
+// already carries the exact key r bound to, when r's reason does not
+// itself call for redoing the work (retry and merge do); the caller must
+// not run the processor again in that case (Important finding I1).
+func (s *Service) prepare(r *Record) (*snapshot, *workspace.Answer, binding, *Record, error) {
 	s.snapMu.Lock()
 	defer s.snapMu.Unlock()
 	defer func() {
@@ -77,26 +98,32 @@ func (s *Service) prepare(r *Record) (*snapshot, *workspace.Answer, binding, err
 	}()
 	snap, ok, err := s.load(r.Workspace)
 	if err != nil {
-		return nil, nil, binding{}, err
+		return nil, nil, binding{}, nil, err
 	}
 	if !ok {
-		return nil, nil, binding{}, fmt.Errorf("workspace %s has no main branch", r.Workspace)
+		return nil, nil, binding{}, nil, fmt.Errorf("workspace %s has no main branch", r.Workspace)
 	}
 	a := snap.w.Answers[r.AnswerPath]
 	if a == nil {
-		return nil, nil, binding{}, fmt.Errorf("%s is no longer on main", r.AnswerPath)
+		return nil, nil, binding{}, nil, fmt.Errorf("%s is no longer on main", r.AnswerPath)
 	}
 	b, ok := bindingFor(snap.w, snap.c, a)
 	if !ok {
-		return nil, nil, binding{}, fmt.Errorf("task %s is no longer bound to a registered processor", a.Task)
+		return nil, nil, binding{}, nil, fmt.Errorf("task %s is no longer bound to a registered processor", a.Task)
 	}
+	oldKey := r.Key
+	var existing *Record
 	err = s.update(r, func(r *Record) {
 		r.Task = task.Ref{ID: a.Task, Version: a.TaskVersion}
 		r.AnswerBlob, r.AnswerCommit = snap.blobs[a.Path], snap.commit
 		r.Processor, r.Image, r.Digest = b.name, b.proc.Image, b.digest
 		r.Key = runKey(r.Workspace, a.Path, r.AnswerBlob, b.digest)
+		s.rekey(oldKey, r.Key)
+		if r.Reason != ReasonRetry && r.Reason != ReasonMerge {
+			existing = s.terminalFor(r.Workspace, r.Key, r.ID)
+		}
 	})
-	return snap, a, b, err
+	return snap, a, b, existing, err
 }
 
 // process runs image ref (digest "sha256:<hex>") with the timeout, network

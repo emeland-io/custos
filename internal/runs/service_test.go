@@ -1,6 +1,7 @@
 package runs
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emeland-io/custos/internal/attest"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/proctest"
 	"github.com/emeland-io/custos/internal/proposal"
+	"github.com/emeland-io/custos/internal/runner"
 	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/task"
 )
@@ -142,12 +145,50 @@ func TestFailedRuns(t *testing.T) {
 // pullable: the run fails instead of hanging the queue.
 func TestUnavailableImage(t *testing.T) {
 	missing := "custos.test/missing@sha256:" + strings.Repeat("0", 64)
-	e := newEnv(t, registry([]proc{{name: "p", image: missing}}, map[string]string{fixture.TaskB: "p"}), Config{})
-	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+
+	// The queue must keep processing other work after a run fails because
+	// its image cannot be found or pulled (Review Focus 3): bind TaskB to
+	// the missing image and TaskA to a working one, with one worker so
+	// processing is strictly sequential, and confirm the second answer's
+	// run still succeeds.
+	echo := proctest.Image(t, "echo")
+	e := newEnv(t, registry([]proc{{name: "bad", image: missing}, {name: "good", image: echo}},
+		map[string]string{fixture.TaskB: "bad", fixture.TaskA: "good"}), Config{Workers: 1})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n"), answerA: textAnswer(fixture.TaskA, "1.1.0", "ok")})
 	rs := e.runs(t, ws)
-	if len(rs) != 1 || rs[0].State != Failed || rs[0].Error == "" {
-		t.Fatalf("runs %+v, want one failed run", rs)
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v, want one failed run and one that still succeeded", rs)
 	}
+	var sawFailed, sawSucceeded bool
+	for _, r := range rs {
+		switch {
+		case r.AnswerPath == answerB:
+			sawFailed = r.State == Failed && r.Error != ""
+		case r.AnswerPath == answerA:
+			sawSucceeded = r.State == Succeeded && r.Outcome == Proposed
+		}
+	}
+	if !sawFailed || !sawSucceeded {
+		t.Fatalf("runs %+v, want the bad image to fail and the queue to still process the good one", rs)
+	}
+
+	// A missing runtime binary must fail the run the same way, not hang
+	// the worker or panic.
+	t.Run("missing runtime", func(t *testing.T) {
+		e := newStoppedEnv(t, registry([]proc{{name: "p", image: missing}}, map[string]string{fixture.TaskB: "p"}), Config{})
+		svc, err := New(e.st, e.bl, runner.New(runner.Config{Runtime: "/nonexistent/docker"}), attest.Unverified, Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.svc = svc
+		e.st.OnMainMoved(svc.Scan)
+		e.svc.Start(t.Context())
+		e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+		rs := e.runs(t, ws)
+		if len(rs) != 1 || rs[0].State != Failed || rs[0].Error == "" {
+			t.Fatalf("runs %+v, want one failed run", rs)
+		}
+	})
 }
 
 func TestRetry(t *testing.T) {
@@ -193,14 +234,22 @@ func TestRetry(t *testing.T) {
 // running when the previous process stopped; the next Service runs it.
 func TestRestartQueuesInterruptedRuns(t *testing.T) {
 	echo := proctest.Image(t, "echo")
-	e := newEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
-	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
-	first := e.runs(t, ws)[0]
+	// newStoppedEnv, not newEnv: the commit below must not itself produce a
+	// completed run before the hand-written "running" record is loaded,
+	// since that would give the key a terminal record of its own and the
+	// restarted run would then (correctly, per I1) be skipped as
+	// redundant rather than exercising the restart path this test is for.
+	e := newStoppedEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
+	commit := e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
 
-	interrupted := Record{ID: runID, Workspace: ws, Task: first.Task, AnswerPath: answerB, Reason: ReasonAnswer,
-		State: Running, Queued: time.Now().UTC(), Started: time.Now().UTC()}
+	interrupted := Record{ID: runID, Workspace: ws, Task: task.Ref{ID: fixture.TaskB, Version: "1.0.0"}, AnswerPath: answerB,
+		Reason: ReasonAnswer, State: Running, Queued: time.Now().UTC(), Started: time.Now().UTC()}
 	data, _ := json.Marshal(interrupted)
-	if err := os.WriteFile(filepath.Join(e.st.DataDir(), "runs", ws, runID+".json"), data, 0o644); err != nil {
+	dir := filepath.Join(e.st.DataDir(), "runs", ws)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, runID+".json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	e.svc = e.open(t, Config{})
@@ -211,9 +260,63 @@ func TestRestartQueuesInterruptedRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantRun(t, *r, Succeeded, Proposed, ReasonAnswer)
-	if r.Key != first.Key || r.Digest != first.Digest {
-		t.Errorf("the restarted run must record what it used: %+v", r)
+	if r.Key == "" || r.Digest != digestOf(echo) || r.AnswerCommit != commit {
+		t.Errorf("the restarted run must record what it actually used: %+v", r)
 	}
+}
+
+// TestRestartAfterRealCancellation strengthens the above: it starts a real
+// run against an image that never finishes on its own, cancels the
+// service's context while the container is actually running, and confirms
+// the record is left "running" (not failed), its container is gone, and a
+// fresh Service picks the run up and completes it exactly once (I2).
+func TestRestartAfterRealCancellation(t *testing.T) {
+	loop := proctest.Image(t, "loop")
+	e := newStoppedEnv(t, registry([]proc{{name: "p", image: loop}}, map[string]string{fixture.TaskB: "p"}), Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	e.svc.Start(ctx)
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+
+	// Wait for both the record to say "running" and an actual container
+	// to be up: the record's state turns "running" slightly before the
+	// container is actually started (resolving and pulling the image
+	// come first), so either alone would race.
+	var id string
+	waitUntil(t, 10*time.Second, func() bool {
+		rs, err := e.svc.Runs(ws)
+		if err != nil || len(rs) != 1 || rs[0].State != Running {
+			return false
+		}
+		id = rs[0].ID
+		return len(runningContainers(t)) > 0
+	})
+
+	cancel()
+	waitUntil(t, 15*time.Second, func() bool { return len(runningContainers(t)) == 0 })
+
+	r, _, err := e.svc.Get(ws, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.State != Running {
+		t.Fatalf("cancelled run %+v, want it left running on disk", r)
+	}
+
+	// A fresh Service (against the same data dir and a working image for
+	// this answer's processor) picks the interrupted run up and finishes
+	// it exactly once.
+	e.rebind(t, registry([]proc{{name: "p", image: proctest.Image(t, "echo")}}, map[string]string{fixture.TaskB: "p"}))
+	e.svc = e.open(t, Config{})
+	e.svc.Start(t.Context())
+	e.svc.Wait()
+	rs, err := e.svc.Runs(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 1 {
+		t.Fatalf("runs %+v, want the interrupted run completed exactly once, no duplicate", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
 }
 
 func TestRerunIgnoresKey(t *testing.T) {
@@ -339,5 +442,208 @@ func TestQueuedRunTakesNewestAnswer(t *testing.T) {
 	e.svc.Scan(ws)
 	if rs := e.runs(t, ws); len(rs) != 1 {
 		t.Errorf("the newest answer was run already; runs %+v", rs)
+	}
+}
+
+// TestQueuedRunTakesNewestPin is TestQueuedRunTakesNewestAnswer's pin-move
+// variant (I4): the pin moves (changing the processor/digest TaskB binds
+// to) while the queued run for an unchanged answer still waits to start;
+// one run is made, bound to the newest pin.
+func TestQueuedRunTakesNewestPin(t *testing.T) {
+	echo, gen := proctest.Image(t, "echo"), proctest.Image(t, "generate")
+	e := newStoppedEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("doc out pin-moved\n")})
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+	e.rebind(t, registry([]proc{{name: "gen", image: gen}}, map[string]string{fixture.TaskB: "gen"}))
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+	e.svc.Start(t.Context())
+	rs := e.runs(t, ws)
+	if len(rs) != 1 {
+		t.Fatalf("runs %+v, want one (coalesced to the new pin)", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
+	if rs[0].Processor != "gen" || rs[0].Digest != digestOf(gen) {
+		t.Errorf("run %+v, want it bound to the newest pin (processor gen)", rs[0])
+	}
+}
+
+// TestRevertAfterCoalescing is Critical finding C1's required test: an
+// answer is saved, scanned (queuing a run for it) and then changed again
+// before that run starts, so the queued run is coalesced into the newer
+// content and the original content's key is abandoned without ever
+// having actually run. Reverting back to the original content later must
+// not be mistaken for "already covered" by that abandoned, stale key.
+func TestRevertAfterCoalescing(t *testing.T) {
+	echo := proctest.Image(t, "echo")
+	e := newStoppedEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
+
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("alpha\n")})
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("beta\n")})
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+	e.svc.Start(t.Context())
+	rs := e.runs(t, ws)
+	if len(rs) != 1 {
+		t.Fatalf("runs %+v, want one run, coalesced to beta", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
+
+	// Revert to alpha: its key was never actually run (the queued run
+	// above read beta, not alpha, when it started) and must not still
+	// be considered covered.
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("alpha\n")})
+	rs = e.runs(t, ws)
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v, want a second run after reverting to alpha", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
+
+	// The open proposal must reflect what is actually on main (alpha),
+	// not the stale beta content from the first run.
+	p, err := proposal.Get(e.st, ws, fixture.TaskB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := e.st.WorkspaceRepo(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repo.TreeFS("refs/heads/" + p.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !treeContains(t, tree, "documents", "alpha") {
+		t.Error("the open proposal must reflect the reverted answer (alpha)")
+	}
+	if treeContains(t, tree, "documents", "beta") {
+		t.Error("the open proposal must not still reflect the superseded answer (beta)")
+	}
+}
+
+// TestNewerAnswerNeverOverwrittenByOlderRun is Critical finding C2's
+// required test: an older run is still executing its (slow) container
+// when a newer answer is saved; the newer run must not start executing
+// until the older one has fully finished, and the proposal must end up
+// reflecting the newer answer regardless of how slow the older run is.
+func TestNewerAnswerNeverOverwrittenByOlderRun(t *testing.T) {
+	gen := proctest.Image(t, "generate")
+	e := newEnv(t, registry([]proc{{name: "p", image: gen}}, map[string]string{fixture.TaskB: "p"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("sleep 3s\ndoc out v1x\n")})
+
+	// Wait until the slow (older) run is actually executing.
+	waitUntil(t, 10*time.Second, func() bool {
+		rs, err := e.svc.Runs(ws)
+		return err == nil && len(rs) == 1 && rs[0].State == Running
+	})
+
+	// Save a newer answer while the older run is still asleep.
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("doc out v2x\n")})
+
+	// The newer run must be queued but must NOT start executing while
+	// the older one is still running: confirm one running and one queued
+	// record while the older run is still asleep.
+	waitUntil(t, 2*time.Second, func() bool {
+		rs, err := e.svc.Runs(ws)
+		return err == nil && len(rs) == 2
+	})
+	rs, err := e.svc.Runs(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var running, queued int
+	for _, r := range rs {
+		switch r.State {
+		case Running:
+			running++
+		case Queued:
+			queued++
+		}
+	}
+	if running != 1 || queued != 1 {
+		t.Fatalf("while the older run is executing, want exactly one running and one queued, got %+v", rs)
+	}
+
+	rs = e.runs(t, ws) // waits for both to finish
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v", rs)
+	}
+	newer, older := rs[0], rs[1] // Runs returns newest first
+	wantRun(t, older, Succeeded, Proposed, ReasonAnswer)
+	wantRun(t, newer, Succeeded, Proposed, ReasonAnswer)
+	if older.Finished.After(newer.Started) {
+		t.Errorf("the older run (finished %s) must fully finish before the newer one starts (started %s) — "+
+			"overlap means they could race on the proposal write", older.Finished, newer.Started)
+	}
+
+	p, err := proposal.Get(e.st, ws, fixture.TaskB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Branch != newer.Branch {
+		t.Errorf("open proposal branch %q, want the newer run's branch %q", p.Branch, newer.Branch)
+	}
+	repo, err := e.st.WorkspaceRepo(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := repo.TreeFS("refs/heads/" + p.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !treeContains(t, tree, "documents", "v2x") {
+		t.Error("the open proposal must reflect the newer answer (v2x)")
+	}
+	if treeContains(t, tree, "documents", "v1x") {
+		t.Error("the open proposal must not reflect the older, superseded answer (v1x)")
+	}
+}
+
+// TestRedundantKeyNotReexecuted is Important finding I1's required test:
+// a run whose key, by the time it actually executes, already has a
+// terminal record from another run (and whose own reason is not an
+// explicit retry or merge, which are allowed to redo the work) must not
+// run the processor again.
+func TestRedundantKeyNotReexecuted(t *testing.T) {
+	gen := proctest.Image(t, "generate")
+	e := newEnv(t, registry([]proc{{name: "p", image: gen}}, map[string]string{fixture.TaskB: "p"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("stderr marker\ndoc out v1\n")})
+	first := e.runs(t, ws)[0]
+	wantRun(t, first, Succeeded, Proposed, ReasonAnswer)
+
+	// Force a second run of the exact same, unchanged answer (Rerun does
+	// not check whether the key already has a record — merge reruns
+	// explicitly want that). Its reason is not retry/merge, so prepare
+	// must recognize the key already has a terminal result and skip
+	// running the processor again.
+	got, err := e.svc.Rerun(ws, []string{fixture.TaskB}, ReasonAnswer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Rerun = %+v", got)
+	}
+	rs := e.runs(t, ws)
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v", rs)
+	}
+	second := rs[0]
+	wantRun(t, second, Succeeded, Unchanged, ReasonAnswer)
+	if second.Key != first.Key {
+		t.Errorf("the forced rerun of unchanged content must resolve to the same key: %+v, want %s", second, first.Key)
+	}
+	_, log, err := e.svc.Get(ws, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 0 {
+		t.Errorf("a redundant run must not execute the processor again; log = %q", log)
 	}
 }

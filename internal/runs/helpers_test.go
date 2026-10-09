@@ -3,10 +3,12 @@ package runs
 import (
 	"io/fs"
 	"maps"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emeland-io/custos/internal/attest"
 	"github.com/emeland-io/custos/internal/blobs"
@@ -189,4 +191,39 @@ func treeContains(t *testing.T, tree fs.FS, dir, s string) bool {
 		return nil
 	})
 	return found
+}
+
+// waitUntil polls cond (which must not block) until it reports true or
+// timeout elapses, in which case the test fails.
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", timeout)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// runningContainers returns the names of the running "custos-run-*"
+// containers the runner starts (see runner.Run), using the docker CLI
+// directly so tests can assert a container was actually started, and
+// later actually killed, independent of the Service's own bookkeeping.
+func runningContainers(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("docker", "ps", "--filter", "name=custos-run-", "--format", "{{.Names}}").Output()
+	if err != nil {
+		t.Fatalf("docker ps: %v", err)
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			names = append(names, line)
+		}
+	}
+	return names
 }
