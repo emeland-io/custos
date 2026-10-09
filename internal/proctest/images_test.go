@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emeland-io/custos/internal/contract"
 	"github.com/emeland-io/custos/internal/fixture"
@@ -122,11 +123,26 @@ func TestGenerateStderrGarbageAndExit(t *testing.T) {
 }
 
 func TestGenerateBadDirective(t *testing.T) {
-	for _, text := range []string{"frobnicate x", "bump a minor", "task a", "exit x"} {
+	for _, text := range []string{"frobnicate x", "bump a minor", "task a", "exit x", "sleep x", "sleep"} {
 		res := run(t, runner.Config{}, "generate", text, false)
 		if res.ExitCode != 1 || len(res.Stdout) != 0 || !strings.Contains(string(res.Log), "line 1") {
 			t.Errorf("%q: exit %d, stdout %q, log %q", text, res.ExitCode, res.Stdout, res.Log)
 		}
+	}
+}
+
+// TestGenerateSleep checks the sleep directive (added for plan 3d's run
+// service tests, to get deterministic control over how long a run stays
+// "running" without relying on timing races): it actually delays before
+// continuing, and a line after it still runs normally.
+func TestGenerateSleep(t *testing.T) {
+	start := time.Now()
+	res := run(t, runner.Config{}, "generate", "sleep 300ms\ntask a A", false)
+	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
+		t.Errorf("elapsed %s, want at least 300ms", elapsed)
+	}
+	if out := parse(t, res); len(out.Tasks) != 1 {
+		t.Errorf("output %+v, want one task after the sleep", out)
 	}
 }
 

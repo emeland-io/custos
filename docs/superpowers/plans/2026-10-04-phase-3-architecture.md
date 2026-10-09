@@ -179,6 +179,7 @@ Image behaviour (programs in `internal/proctest/images/<name>/main.go`, reading 
   - `stderr <words…>` → writes the words to stderr
   - `garbage` → writes `not json` to stdout instead of an output and exits 0
   - `exit <n>` → exits with code n after writing nothing
+  - `sleep <duration>` → sleeps for the given Go duration (e.g. `3s`) before continuing; added in plan 3d's task 4 fix round to give tests deterministic control over how long a run stays "running," without relying on timing races (test infrastructure only, no production code depends on it)
 - **sign** — like `generate` (same directives), but each `doc` is wrapped in a DSSE envelope (payloadType `application/vnd.in-toto+json`) signed with the ed25519 key in `/run/secrets/test-signing-key`; without that file it exits 2.
 - **fail** — writes `boom` to stderr and exits 3.
 - **loop** — sleeps until killed.

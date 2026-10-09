@@ -227,3 +227,18 @@ func runningContainers(t *testing.T) []string {
 	}
 	return names
 }
+
+// newContainers returns the names in after that are not in before, so a
+// test can scope a "my container is gone" check to the one(s) it actually
+// introduced rather than the whole "custos-run-*" namespace, which other
+// packages' tests (internal/runner's own) also use and which go test may
+// be running concurrently in a sibling package.
+func newContainers(before, after []string) []string {
+	var out []string
+	for _, name := range after {
+		if !slices.Contains(before, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}

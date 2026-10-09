@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -273,26 +274,41 @@ func TestRestartQueuesInterruptedRuns(t *testing.T) {
 func TestRestartAfterRealCancellation(t *testing.T) {
 	loop := proctest.Image(t, "loop")
 	e := newStoppedEnv(t, registry([]proc{{name: "p", image: loop}}, map[string]string{fixture.TaskB: "p"}), Config{})
+
+	// Snapshot what is running before this test starts anything, so the
+	// check below is scoped to the container THIS run introduces rather
+	// than the global "custos-run-*" namespace, which internal/runner's
+	// own tests also use and which go test may be exercising in another
+	// package at the same time.
+	before := runningContainers(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	e.svc.Start(ctx)
 	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
 
-	// Wait for both the record to say "running" and an actual container
-	// to be up: the record's state turns "running" slightly before the
-	// container is actually started (resolving and pulling the image
-	// come first), so either alone would race.
+	// Wait for both the record to say "running" and this run's own
+	// container to be up: the record's state turns "running" slightly
+	// before the container is actually started (resolving and pulling
+	// the image come first), so either alone would race.
 	var id string
+	var mine []string
 	waitUntil(t, 10*time.Second, func() bool {
 		rs, err := e.svc.Runs(ws)
 		if err != nil || len(rs) != 1 || rs[0].State != Running {
 			return false
 		}
 		id = rs[0].ID
-		return len(runningContainers(t)) > 0
+		mine = newContainers(before, runningContainers(t))
+		return len(mine) > 0
 	})
 
 	cancel()
-	waitUntil(t, 15*time.Second, func() bool { return len(runningContainers(t)) == 0 })
+	waitUntil(t, 15*time.Second, func() bool { return len(newContainers(before, runningContainers(t))) == 0 })
+	for _, name := range mine {
+		if slices.Contains(runningContainers(t), name) {
+			t.Fatalf("container %s is still running after cancel", name)
+		}
+	}
 
 	r, _, err := e.svc.Get(ws, id)
 	if err != nil {
@@ -646,4 +662,84 @@ func TestRedundantKeyNotReexecuted(t *testing.T) {
 	if len(log) != 0 {
 		t.Errorf("a redundant run must not execute the processor again; log = %q", log)
 	}
+}
+
+// TestDeletedAnswerReleasesKeyOnFailure is round 2's required test (a): an
+// answer is queued, then deleted before the run starts, so prepare fails
+// before it ever binds to a confirmed key. That failure must release the
+// record's queue-time key (same bug class as C1) so re-adding the exact
+// same answer later triggers a fresh run instead of being blocked by a
+// stale key from a run that never actually bound to it.
+func TestDeletedAnswerReleasesKeyOnFailure(t *testing.T) {
+	echo := proctest.Image(t, "echo")
+	e := newStoppedEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the answer before the queued run starts.
+	e.commit(t, ws, map[string]string{answerB: ""})
+	e.svc.Start(t.Context())
+	rs := e.runs(t, ws)
+	if len(rs) != 1 {
+		t.Fatalf("runs %+v, want one failed run", rs)
+	}
+	wantRun(t, rs[0], Failed, None, ReasonAnswer)
+	if !strings.Contains(rs[0].Error, "no longer on main") {
+		t.Errorf("error %q, want it to name the missing answer", rs[0].Error)
+	}
+	if rs[0].Key != "" {
+		t.Errorf("a run that failed before binding to a key must not still carry one: %+v", rs[0])
+	}
+
+	// Re-adding the exact same answer must trigger a fresh run: the
+	// failed attempt's key must not still be blocking it.
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+	rs = e.runs(t, ws)
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v, want a second run after re-adding the deleted answer", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
+}
+
+// TestUnboundTaskReleasesKeyOnFailure is round 2's required test (b): an
+// answer is queued, then its task is unbound (the processor stays
+// registered, but the binding naming it is removed) before the run
+// starts, so prepare fails before it ever binds to a confirmed key. That
+// failure must release the record's queue-time key so rebinding the same
+// processor (and so the same digest) later triggers a fresh run instead
+// of being blocked by a stale key.
+func TestUnboundTaskReleasesKeyOnFailure(t *testing.T) {
+	echo := proctest.Image(t, "echo")
+	e := newStoppedEnv(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}), Config{})
+	e.commit(t, ws, map[string]string{answerB: markdownAnswer("x\n")})
+	if err := e.svc.scan(ws, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unbind TaskB before the queued run starts: the processor stays
+	// registered, but nothing names it for TaskB any more.
+	e.rebind(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{}))
+	e.svc.Start(t.Context())
+	rs := e.runs(t, ws)
+	if len(rs) != 1 {
+		t.Fatalf("runs %+v, want one failed run", rs)
+	}
+	wantRun(t, rs[0], Failed, None, ReasonAnswer)
+	if !strings.Contains(rs[0].Error, "no longer bound") {
+		t.Errorf("error %q, want it to name the task as unbound", rs[0].Error)
+	}
+	if rs[0].Key != "" {
+		t.Errorf("a run that failed before binding to a key must not still carry one: %+v", rs[0])
+	}
+
+	// Rebinding the same processor (and so the same digest) must trigger
+	// a fresh run: the failed attempt's key must not still block it.
+	e.rebind(t, registry([]proc{{name: "scan", image: echo}}, map[string]string{fixture.TaskB: "scan"}))
+	rs = e.runs(t, ws)
+	if len(rs) != 2 {
+		t.Fatalf("runs %+v, want a second run after rebinding the task", rs)
+	}
+	wantRun(t, rs[0], Succeeded, Proposed, ReasonAnswer)
 }

@@ -98,17 +98,21 @@ func (s *Service) prepare(r *Record) (*snapshot, *workspace.Answer, binding, *Re
 	}()
 	snap, ok, err := s.load(r.Workspace)
 	if err != nil {
+		s.releaseKey(r)
 		return nil, nil, binding{}, nil, err
 	}
 	if !ok {
+		s.releaseKey(r)
 		return nil, nil, binding{}, nil, fmt.Errorf("workspace %s has no main branch", r.Workspace)
 	}
 	a := snap.w.Answers[r.AnswerPath]
 	if a == nil {
+		s.releaseKey(r)
 		return nil, nil, binding{}, nil, fmt.Errorf("%s is no longer on main", r.AnswerPath)
 	}
 	b, ok := bindingFor(snap.w, snap.c, a)
 	if !ok {
+		s.releaseKey(r)
 		return nil, nil, binding{}, nil, fmt.Errorf("task %s is no longer bound to a registered processor", a.Task)
 	}
 	oldKey := r.Key
@@ -124,6 +128,23 @@ func (s *Service) prepare(r *Record) (*snapshot, *workspace.Answer, binding, *Re
 		}
 	})
 	return snap, a, b, existing, err
+}
+
+// releaseKey clears r's claim on the key it currently holds (its intended,
+// queue-time key, since this is only called before prepare ever reaches a
+// successful rekey to a confirmed one) and r.Key itself, so a run that
+// fails before it can bind to a real key — the answer is gone, or the task
+// is no longer bound to a registered processor — never leaves that key
+// registered under a record that no longer meaningfully carries it (same
+// bug class as Critical finding C1, found in review round 2). execute's
+// subsequent update to Failed persists the cleared field; this only needs
+// to update the in-memory bookkeeping under mu, since r is exclusively
+// owned by the goroutine executing it until that later save happens.
+func (s *Service) releaseKey(r *Record) {
+	s.mu.Lock()
+	s.rekey(r.Key, "")
+	r.Key = ""
+	s.mu.Unlock()
 }
 
 // process runs image ref (digest "sha256:<hex>") with the timeout, network
