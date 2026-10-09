@@ -120,7 +120,7 @@ func openServer(dataDir, publicURL string, stderr io.Writer) (*server.Server, er
 		if err := distribute.ReconcileWorkspace(st, id); err != nil {
 			fmt.Fprintf(stderr, "custos serve: workspace %s: %v\n", id, err)
 		}
-	})
+	}, nil)
 	srv := server.New(st)
 	startDistribution(st, a, srv, stderr)
 	srv.WithAPI(a.Handler())

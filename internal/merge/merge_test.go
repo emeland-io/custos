@@ -152,7 +152,8 @@ func TestMergeModifyDeleteConflict(t *testing.T) {
 }
 
 func TestMergeGeneratedAndDocumentConflicts(t *testing.T) {
-	// Ruling 2.10: until phase 3 these are resolved by choosing a side.
+	// §4.4, replacing ruling 2.10: main's side is kept and the producing
+	// task is reported for a rerun.
 	e := setup(t)
 	gen := "generated/" + fixture.TaskC + "/1.0.0.md"
 	doc := "documents/" + fixture.DocID + ".json"
@@ -167,23 +168,74 @@ func TestMergeGeneratedAndDocumentConflicts(t *testing.T) {
 		map[string]string{gen: genOn("main"), doc: docOn("main")},
 		map[string]string{gen: genOn("branch"), doc: docOn("branch")})
 
+	if _, err := Merge(e.st, ws, "what-if", alice, map[string]Resolution{gen: {Side: SideTheirs}}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a resolution for generated output must be refused, got %v", err)
+	}
 	res, err := Merge(e.st, ws, "what-if", alice, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Conflicts) != 2 || res.Conflicts[0].Path != doc || res.Conflicts[0].Kind != KindDocument ||
-		res.Conflicts[1].Path != gen || res.Conflicts[1].Kind != KindGenerated {
-		t.Fatalf("conflicts %+v, want document then generated", res.Conflicts)
+	if len(res.Conflicts) != 0 || res.Commit == "" {
+		t.Fatalf("result %+v, want a merge without open conflicts", res)
 	}
-	res, err = Merge(e.st, ws, "what-if", alice, map[string]Resolution{gen: {Side: SideTheirs}, doc: {Side: SideOurs}})
-	if err != nil {
-		t.Fatal(err)
+	if len(res.Rerun) != 1 || res.Rerun[0] != fixture.TaskB {
+		t.Errorf("rerun %v, want the producing task %s", res.Rerun, fixture.TaskB)
 	}
-	if got, _ := file(t, e.st, ws, res.Commit, gen); got != genOn("branch") {
-		t.Errorf("generated task = %q, want the branch's", got)
+	if got, _ := file(t, e.st, ws, res.Commit, gen); got != genOn("main") {
+		t.Errorf("generated task = %q, want main's", got)
 	}
 	if got, _ := file(t, e.st, ws, res.Commit, doc); got != docOn("main") {
 		t.Errorf("document = %q, want main's", got)
+	}
+}
+
+// TestMergeGeneratedDeletedOnMain keeps main's deletion of a generated
+// file the branch changed, and still reruns its producer.
+func TestMergeGeneratedDeletedOnMain(t *testing.T) {
+	e := setup(t)
+	doc := "documents/" + fixture.DocID + ".json"
+	diverge(t, e,
+		map[string]string{doc: fixture.DocumentFile},
+		map[string]string{doc: ""},
+		map[string]string{doc: strings.Replace(fixture.DocumentFile, `"name":"provenance"`, `"name":"changed"`, 1)})
+	res, err := Merge(e.st, ws, "what-if", alice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := file(t, e.st, ws, res.Commit, doc); ok {
+		t.Error("main deleted the document; the merge must keep it deleted")
+	}
+	if len(res.Rerun) != 1 || res.Rerun[0] != fixture.TaskB {
+		t.Errorf("rerun %v", res.Rerun)
+	}
+}
+
+// TestMergeAnswerConflictWithGeneratedOutput reports only the answer as
+// a conflict and the rerun only once the merge is made.
+func TestMergeAnswerConflictWithGeneratedOutput(t *testing.T) {
+	e := setup(t)
+	doc := "documents/" + fixture.DocID + ".json"
+	docOn := func(side string) string {
+		return strings.Replace(fixture.DocumentFile, `"name":"provenance"`, `"name":"provenance-`+side+`"`, 1)
+	}
+	b := func(v string) string { return textAnswer(fixture.TaskB, "1.0.0", v) }
+	diverge(t, e,
+		map[string]string{doc: fixture.DocumentFile, answerB: b("base")},
+		map[string]string{doc: docOn("main"), answerB: b("main")},
+		map[string]string{doc: docOn("branch"), answerB: b("branch")})
+	res, err := Merge(e.st, ws, "what-if", alice, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Conflicts) != 1 || res.Conflicts[0].Path != answerB || res.Rerun != nil || res.Commit != "" {
+		t.Fatalf("result %+v, want only the answer conflict", res)
+	}
+	res, err = Merge(e.st, ws, "what-if", alice, map[string]Resolution{answerB: {Side: SideTheirs}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Commit == "" || len(res.Rerun) != 1 || res.Rerun[0] != fixture.TaskB {
+		t.Errorf("result %+v", res)
 	}
 }
 
