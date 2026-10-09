@@ -8,10 +8,12 @@ all: build
 build:
 	go build -o $(BINARY) ./cmd/custos
 
-## test: vet and run all tests (needs git on PATH)
+## test: vet and run all tests, including both SDKs (needs git, docker and python3 on PATH)
 test:
 	go vet ./...
 	go test ./...
+	cd sdk/go && go vet ./... && go test ./...
+	python3 -m unittest discover -s sdk/python
 
 ## docker: build the container image custos:dev
 docker:
