@@ -181,10 +181,19 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 		}}}
 	}
 	unlock := s.Lock(id)
+	// created is flipped to true only once finishCreateWorkspace has
+	// genuinely succeeded, not merely read from the named return err: err
+	// is reassigned several times on the way here (catalogMain,
+	// CreateWorkspaceRepo), so gating on "err == nil" would wrongly fire
+	// mainMoved if a panic struck after one of those earlier successes but
+	// before the real write. Gating on this dedicated, default-false local
+	// instead keeps the trigger fail-closed under a panic, matching
+	// UpdateWorkspaceAndThen and SetRef below.
+	created := false
 	// Registered before the unlock defer, so by LIFO ordering it runs after
 	// unlock has already released the lock.
 	defer func() {
-		if err == nil {
+		if created {
 			s.mainMoved(id)
 		}
 	}()
@@ -197,8 +206,20 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 	if err != nil {
 		return err
 	}
-	return s.finishCreateWorkspace(repo, id, author, pin)
+	if testPanicBeforeFinishCreateWorkspace != nil {
+		testPanicBeforeFinishCreateWorkspace()
+	}
+	err = s.finishCreateWorkspace(repo, id, author, pin)
+	created = err == nil
+	return err
 }
+
+// testPanicBeforeFinishCreateWorkspace, when non-nil, is called by
+// CreateWorkspace just before the call that actually writes the initial
+// commit and moves main. Only this package's tests set it, to verify that a
+// panic on this path still leaves the workspace's lock released and does
+// not fire the OnMainMoved callbacks (see TestCreateWorkspacePanicDoesNotFireOnMainMoved).
+var testPanicBeforeFinishCreateWorkspace func()
 
 // finishCreateWorkspace commits custos.yaml pinned to pin on repo's empty
 // main. The repository is removed on failure, except when the final

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gitrepo"
@@ -106,5 +107,42 @@ func TestOnMainMovedOutsideLock(t *testing.T) {
 	}
 	if mainOf(t, s, "refs/heads/notes") == "" {
 		t.Error("the callback's write is missing")
+	}
+}
+
+// TestCreateWorkspacePanicDoesNotFireOnMainMoved checks that CreateWorkspace's
+// OnMainMoved trigger is fail-closed: a panic on the path to the write that
+// would move main must neither fire the callback nor leave the workspace's
+// lock held.
+func TestCreateWorkspacePanicDoesNotFireOnMainMoved(t *testing.T) {
+	s, _ := open(t)
+	var m moves
+	s.OnMainMoved(m.add)
+	id := fixture.WorkspaceID
+
+	testPanicBeforeFinishCreateWorkspace = func() { panic("boom") }
+	defer func() { testPanicBeforeFinishCreateWorkspace = nil }()
+
+	func() {
+		defer func() { recover() }()
+		s.CreateWorkspace(id, jane)
+	}()
+
+	if got := m.take(); len(got) != 0 {
+		t.Errorf("mainMoved fired despite a panic before the write: %v", got)
+	}
+
+	// The lock must have been released despite the panic (defer unlock()
+	// still ran): Lock must not block here.
+	done := make(chan struct{})
+	go func() {
+		unlock := s.Lock(id)
+		unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("workspace lock was not released after the panic")
 	}
 }
