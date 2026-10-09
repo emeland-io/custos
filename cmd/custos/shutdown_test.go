@@ -249,13 +249,22 @@ func TestServeShutdownDoesNotWaitForQueuedBacklog(t *testing.T) {
 		t.Errorf("shutdown reported a timeout, want it to have returned quickly once the in-flight run stopped:\n%s", s)
 	}
 	// (c) The container actually running is confirmed gone, not merely
-	// asked to stop.
-	still := runningRunContainers(t)
-	for _, name := range mine {
-		if slices.Contains(still, name) {
-			t.Fatalf("container %s is still running after shutdown returned", name)
+	// asked to stop. docker rm --force's CLI return and docker ps's view
+	// of container state are not perfectly synchronized under host/Docker
+	// contention, so this polls with a short, bounded timeout rather than
+	// checking once immediately; the removal itself is already synchronous
+	// (runner.remove runs "docker rm --force" before Run returns), so this
+	// is confirming something that should already be done, not waiting for
+	// new work, hence the short timeout.
+	waitForCondition(t, 5*time.Second, func() bool {
+		still := runningRunContainers(t)
+		for _, name := range mine {
+			if slices.Contains(still, name) {
+				return false
+			}
 		}
-	}
+		return true
+	})
 
 	// (d) The still-queued (never started) record is left Queued on disk,
 	// and the interrupted (actually running) one is left Running, exactly
