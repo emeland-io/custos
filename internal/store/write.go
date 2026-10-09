@@ -55,6 +55,14 @@ func (s *Store) UpdateWorkspace(id, ref string, author gitrepo.Signature, messag
 // called at all when edit fails or the update never reaches a ref write
 // (a RejectedError, or a lost compare-and-swap this call does not retry on
 // its own).
+//
+// When ref is "refs/heads/main" and this call actually moved it, the
+// OnMainMoved callbacks are called once the lock has been released — after
+// then has run and after unlock, so they never run while this call still
+// holds the workspace's lock (unlike then, which runs inside it). This
+// holds for every caller of UpdateWorkspaceAndThen, including ones that
+// bypass the plain UpdateWorkspace wrapper (such as proposal.Accept's
+// then-based branch deletion).
 func (s *Store) UpdateWorkspaceAndThen(id, ref string, author gitrepo.Signature, message string,
 	edit func(tree fs.FS) ([]gitrepo.Change, error), then func(repo *gitrepo.Repo, oid string) error) (string, error) {
 	repo, err := s.WorkspaceRepo(id)
@@ -65,8 +73,16 @@ func (s *Store) UpdateWorkspaceAndThen(id, ref string, author gitrepo.Signature,
 		return "", err
 	}
 	unlock := s.Lock(id)
+	var moved bool
+	// Registered before the unlock defer, so by LIFO ordering it runs after
+	// unlock has already released the lock.
+	defer func() {
+		if moved && ref == mainRef {
+			s.mainMoved(id)
+		}
+	}()
 	defer unlock()
-	oid, err := s.updateWorkspaceLocked(repo, id, ref, author, message, edit)
+	oid, moved, err := s.updateWorkspaceLocked(repo, id, ref, author, message, edit)
 	if err != nil {
 		return "", err
 	}
@@ -80,54 +96,58 @@ func (s *Store) UpdateWorkspaceAndThen(id, ref string, author gitrepo.Signature,
 
 // updateWorkspaceLocked is UpdateWorkspace's body, run by a caller that
 // already holds s.Lock(id) for its whole duration (UpdateWorkspaceAndThen).
+// moved reports whether ref was actually moved to a new commit (false for a
+// no-op edit, a validation rejection or a lost compare-and-swap).
 func (s *Store) updateWorkspaceLocked(repo *gitrepo.Repo, id, ref string, author gitrepo.Signature, message string,
-	edit func(tree fs.FS) ([]gitrepo.Change, error)) (string, error) {
+	edit func(tree fs.FS) ([]gitrepo.Change, error)) (commit string, moved bool, err error) {
 	old, _, err := repo.ResolveRef(ref)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	base := old
 	if base == "" {
 		if base, _, err = repo.ResolveRef(mainRef); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	var tree fs.FS = fstest.MapFS{}
 	if base != "" {
 		if tree, err = repo.TreeFS(base); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	changes, err := edit(tree)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	changes = effective(tree, changes)
 	if len(changes) == 0 {
-		return old, nil
+		return old, false, nil
 	}
 	req := gitrepo.CommitRequest{Base: base, Changes: changes, Author: author, Message: message}
 	if base != "" {
 		req.Parents = []string{base}
 	}
-	commit, err := repo.WriteCommit(req)
+	commit, err = repo.WriteCommit(req)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if ref == mainRef {
 		if err := s.validateMain(repo, id, old, commit); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	if err := repo.UpdateRef(ref, commit, old); err != nil {
-		return "", conflict(err)
+		return "", false, conflict(err)
 	}
-	return commit, nil
+	return commit, true, nil
 }
 
 // SetRef moves ref of a workspace to an existing commit (fast-forward or merge
 // result computed by the caller) with the same lock, validation (main only) and
-// compare-and-swap. oldOID "" = ref must not exist.
+// compare-and-swap. oldOID "" = ref must not exist. When ref is main and newOID
+// differs from oldOID, a successful call calls the OnMainMoved callbacks once
+// the lock has been released.
 func (s *Store) SetRef(id, ref, newOID, oldOID string) error {
 	repo, err := s.WorkspaceRepo(id)
 	if err != nil {
@@ -137,13 +157,25 @@ func (s *Store) SetRef(id, ref, newOID, oldOID string) error {
 		return err
 	}
 	unlock := s.Lock(id)
+	moved := false
+	// Registered before the unlock defer, so by LIFO ordering it runs after
+	// unlock has already released the lock.
+	defer func() {
+		if moved && ref == mainRef && newOID != oldOID {
+			s.mainMoved(id)
+		}
+	}()
 	defer unlock()
 	if ref == mainRef {
 		if err := s.validateMain(repo, id, oldOID, newOID); err != nil {
 			return err
 		}
 	}
-	return conflict(repo.UpdateRef(ref, newOID, oldOID))
+	if err := conflict(repo.UpdateRef(ref, newOID, oldOID)); err != nil {
+		return err
+	}
+	moved = true
+	return nil
 }
 
 // Load reads a workspace at rev ("" = main) and the catalog at its pin.

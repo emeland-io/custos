@@ -52,8 +52,9 @@ type Store struct {
 	exe       string // the custos binary the hooks run
 	publicURL string // without trailing slash
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex // by "catalog" or workspace id
+	mu     sync.Mutex
+	locks  map[string]*sync.Mutex // by "catalog" or workspace id
+	onMain []func(id string)      // see OnMainMoved
 }
 
 // New returns a store for the data directory without touching it. exe is the
@@ -170,7 +171,9 @@ func (s *Store) WorkspaceIDs() ([]string, error) {
 // CreateWorkspace creates the bare repository with its hook and an initial
 // commit on main whose custos.yaml pins the current catalog main (ruling 2.13).
 // ErrExists if it exists; error if the catalog has no main. Only the new
-// repository's hook is installed (ruling 1.8).
+// repository's hook is installed (ruling 1.8). A successful call moves main
+// from nothing to the initial commit and calls the OnMainMoved callbacks
+// after the workspace's lock is released.
 func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error) {
 	if !task.ValidID(id) {
 		return &RejectedError{Problems: []problem.Problem{{
@@ -178,6 +181,13 @@ func (s *Store) CreateWorkspace(id string, author gitrepo.Signature) (err error)
 		}}}
 	}
 	unlock := s.Lock(id)
+	// Registered before the unlock defer, so by LIFO ordering it runs after
+	// unlock has already released the lock.
+	defer func() {
+		if err == nil {
+			s.mainMoved(id)
+		}
+	}()
 	defer unlock()
 	pin, err := s.catalogMain()
 	if err != nil {
@@ -264,6 +274,32 @@ func (s *Store) Lock(repo string) func() {
 	s.mu.Unlock()
 	m.Lock()
 	return m.Unlock
+}
+
+// OnMainMoved registers f to be called with a workspace's id after
+// UpdateWorkspace, SetRef or CreateWorkspace moved that workspace's main to
+// a genuinely different commit. f runs synchronously in the writer's
+// goroutine, after the workspace's lock has already been released, so it
+// may itself write to the store (including calling UpdateWorkspace) without
+// deadlocking; it should return quickly. It is not called for writes to
+// other branches, for writes that change nothing, or for writes that fail
+// (validation, lost compare-and-swap). Pushes do not go through the store;
+// see server.OnWorkspacePush.
+func (s *Store) OnMainMoved(f func(id string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onMain = append(s.onMain, f)
+}
+
+// mainMoved calls the OnMainMoved callbacks. The caller holds no lock on the
+// workspace.
+func (s *Store) mainMoved(id string) {
+	s.mu.Lock()
+	fs := slices.Clone(s.onMain)
+	s.mu.Unlock()
+	for _, f := range fs {
+		f(id)
+	}
 }
 
 // catalogMain returns the commit of the catalog's main.
