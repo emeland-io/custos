@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - **No new npm dependency of any kind** — not for drag-and-drop, not for graph drawing (ruling 4.16), not for diffing, not for anything else. `web/package.json` and `web/package-lock.json` are not modified by this plan. Drag-and-drop is the browser's native HTML5 DnD API; the version graph is an ordered list; the diff is a 40-line LCS function in this plan.
-- **Every view fetches through the shared client.** All JSON requests go through `request()` from plan 4c's `web/src/api/client.ts`, wrapped by this plan's `web/src/api/authors.ts`. Views never call `fetch` themselves. The single exception is `getRunLog` in `authors.ts` (the log endpoint answers `text/plain`, which a JSON client cannot return); it uses the same same-origin, `credentials: 'include'` settings.
+- **Every view fetches through the shared client.** All JSON requests go through plan 4c's actual `web/src/api/client.ts` export, the `api` object (`api.get/post/put/del`; an earlier draft of this plan assumed a standalone `request()` function, corrected during cross-plan review — see "Decisions"), wrapped by this plan's `web/src/api/authors.ts`. Views never call `fetch` themselves. The single exception is `getRunLog` in `authors.ts` (the log endpoint answers `text/plain`, which a JSON client cannot return); it uses the same same-origin, `credentials: 'include'` settings, plus the same `Authorization: Bearer` header `client.ts` attaches in token-only mode (also fixed during cross-plan review).
 - **Types are hand-written mirrors** of the Go JSON shapes (ruling 4.4), added as new files beside plan 4c's in `web/src/types/` (`taskAuthor.ts`, `processorAuthor.ts`), each field commented with its Go source where the name is not obvious. No generated types, no parallel data-fetching layer.
 - **`vue-tsc --noEmit` (`npm run type-check`) is the only automated frontend check** (ruling 4.4). Do not add a component test runner, Vitest, Playwright, or any test file. Each task's behaviour is verified by the manual click-through it lists, recorded in the task's report the same way phase 3 tasks recorded real-Docker runs.
 - **No Go code, no Go tests.** If a task seems to need a backend change, stop and report it; do not add an endpoint.
@@ -32,11 +32,11 @@ The architecture note fixes file locations but not every exported name. This pla
 
 | Assumption | Used only in |
 | --- | --- |
-| `web/src/api/client.ts` exports `class ApiError extends Error { status: number; body: unknown }` (body is the parsed JSON object for a JSON error response, otherwise the response text) and `function request<T>(method: 'GET' \| 'POST' \| 'PUT' \| 'DELETE', path: string, body?: unknown): Promise<T>` (JSON-encodes `body`, `credentials: 'include'`, resolves `undefined` for 204/empty bodies, rejects with `ApiError` for non-2xx). | `web/src/api/authors.ts` (top import + `errorMessage`/`problemsOf`/`conflictsOf`/`statusOf`) |
-| The SPA authenticates `fetch` purely by the session cookie (the note's "credentials: include (session cookie)"); the token-only-mode paste box in `LoginView` exchanges or stores the token so the cookie, not a header, carries it. | `getRunLog` in `web/src/api/authors.ts` — if 4c's client instead adds an `Authorization` header, give `getRunLog` the same header |
+| **Confirmed against 4c's actual code** (cross-plan review): `web/src/api/client.ts` exports `class ApiError extends Error { status: number; body: unknown }` and an `api` object with `get<T>(path)`, `post<T>(path, body?)`, `put<T>(path, body?)`, `del<T>(path, body?)` methods (JSON-encodes `body`, `credentials: 'include'`, resolves `undefined` for 204/empty bodies, rejects with `ApiError` for non-2xx) — **not** a standalone `request<T>(method, path, body?)` function as this row originally assumed. `web/src/api/authors.ts` (Task 1) has been rewritten to call `api.get/post/put/del` throughout. | `web/src/api/authors.ts` (top import + `errorMessage`/`problemsOf`/`conflictsOf`/`statusOf`) |
+| **Confirmed against 4c's actual code:** the SPA authenticates `fetch` by the session cookie *and*, in token-only mode, an `Authorization: Bearer` header read from `api/token.ts`'s `getToken()` (`client.ts`'s `authHeaders()`) — not purely the cookie, as this row originally assumed. `getRunLog` has been fixed to attach the same header via the same `getToken()`, so a log request is not left unauthenticated under a pasted token. | `getRunLog` in `web/src/api/authors.ts` |
 | `web/src/stores/auth.ts` exports `useAuthStore()`, whose `principal` is `null` or `{ name, email, roles: { admin: boolean, task_author: boolean, processor_author: boolean, engineer: string[] } }` (the `GET /auth/me` body), and plan 4c's global `beforeEach` has awaited the `/auth/me` load before any route's component is created. | `useAuthorRole` in `web/src/router/authors.ts` |
-| `web/src/router/index.ts` builds its router from a `routes` array literal, and its global guard sends unauthenticated users to sign in for routes with `meta: { requiresAuth: true }`. | `web/src/router/authors.ts` (`meta`), one insertion in `router/index.ts` |
-| `RoleGate.vue` has a prop `role` taking the `/auth/me` role names (`'task_author'`, `'processor_author'`, …), renders its default slot only when the principal has that role, and treats `admin` as having every role. | two insertions in `App.vue` |
+| **Confirmed against 4c's actual code** (cross-plan review): `web/src/router/index.ts` builds its router from a `routes` array literal, and its global guard requires auth by default, opting a route *out* via `meta: { public: true }` — not opting a route *in* via `meta: { requiresAuth: true }` as this row originally assumed. `authorRoutes`' routes need no `meta` at all (the default already covers them); the dead `requiresAuth` key has been removed from every route this plan adds. | `web/src/router/authors.ts`, one insertion in `router/index.ts` |
+| **Corrected by cross-plan review:** `RoleGate.vue`'s prop `role` takes the *hyphenated* role strings mirroring `internal/auth.Require`'s role names — `'admin' \| 'task-author' \| 'processor-author' \| 'engineer'` — not the `/auth/me` JSON field names (`task_author`, `processor_author`) this row originally assumed. It renders its default slot only when `stores/auth.ts`'s `has(role, workspaceId)` (which does use the hyphenated names) returns true, and `has()` already treats `admin` as having every role. The two `App.vue` insertions use `role="task-author"` / `role="processor-author"`. | two insertions in `App.vue` |
 | `ProblemList.vue` has a prop `problems: { path: string; rule: string; message: string }[]`. | `DraftsView.vue`, `GroupTreeView.vue`, `TaskEditorView.vue` |
 | `MarkdownView.vue` has a prop `source: string` (the Markdown text to render). | `TaskEditorView.vue` (two uses) |
 | 4b's `Draft` is encoded with lower-case snake_case JSON names: `{"id","branch","title","author":{"name","email"},"base","commit"}`. | `Draft` in `web/src/types/taskAuthor.ts` |
@@ -416,11 +416,20 @@ export interface DryRunStarted {
 
 ```ts
 // Endpoint functions for the Task-Author and Processor-Author views
-// (plan 4d). Every JSON call goes through request() from the shared client
-// (plan 4c); this file is the only place plan 4d touches that client.
-// getRunLog alone calls fetch itself, because its endpoint answers
-// text/plain, with the client's same-origin, credentials: 'include' setup.
-import { ApiError, request } from './client'
+// (plan 4d). Every JSON call goes through the shared client's `api`
+// object (plan 4c's actual export: api.get/post/put/del, not a standalone
+// request() function as an earlier draft of this plan assumed — fixed
+// during cross-plan review once 4c's api/client.ts was readable); this
+// file is the only place plan 4d touches that client. getRunLog alone
+// calls fetch itself, because its endpoint answers text/plain, with the
+// client's same-origin, credentials: 'include' setup — and, since 4c's
+// client also attaches an Authorization: Bearer header in token-only mode
+// (see api/token.ts), getRunLog attaches the same header itself so the
+// log request is not left unauthenticated in that mode (also found during
+// cross-plan review; flagged by this plan's own "Decisions" as an open
+// question, now resolved).
+import { ApiError, api } from './client'
+import { getToken } from './token'
 import type {
   CatalogJSON,
   CatalogProblem,
@@ -447,25 +456,25 @@ const seg = encodeURIComponent
 /* ---------- catalog main (read-only; internal/api/catalog.go) ---------- */
 
 export function getCatalog(): Promise<CatalogJSON> {
-  return request<CatalogJSON>('GET', '/api/catalog')
+  return api.get<CatalogJSON>('/api/catalog')
 }
 
 export function getCatalogTask(id: string): Promise<TaskHistory> {
-  return request<TaskHistory>('GET', `/api/catalog/tasks/${seg(id)}`)
+  return api.get<TaskHistory>(`/api/catalog/tasks/${seg(id)}`)
 }
 
 /* ---------- catalog drafts (plan 4b) ---------- */
 
 export async function listDrafts(): Promise<Draft[]> {
-  return (await request<Draft[] | null>('GET', '/api/catalog/drafts')) ?? []
+  return (await api.get<Draft[] | null>('/api/catalog/drafts')) ?? []
 }
 
 export function createDraft(title: string): Promise<Draft> {
-  return request<Draft>('POST', '/api/catalog/drafts', { title })
+  return api.post<Draft>('/api/catalog/drafts', { title })
 }
 
 export async function getDraft(id: string): Promise<DraftDetail> {
-  const d = await request<DraftDetail>('GET', `/api/catalog/drafts/${seg(id)}`)
+  const d = await api.get<DraftDetail>(`/api/catalog/drafts/${seg(id)}`)
   // Go encodes empty slices as null unless the handler says otherwise.
   return {
     draft: d.draft,
@@ -475,51 +484,61 @@ export async function getDraft(id: string): Promise<DraftDetail> {
 }
 
 export async function deleteDraft(id: string): Promise<void> {
-  await request<unknown>('DELETE', `/api/catalog/drafts/${seg(id)}`)
+  await api.del<unknown>(`/api/catalog/drafts/${seg(id)}`)
 }
 
 export async function putTaskVersion(draftId: string, taskId: string, body: NewVersionRequest): Promise<void> {
-  await request<unknown>('PUT', `/api/catalog/drafts/${seg(draftId)}/tasks/${seg(taskId)}`, body)
+  await api.put<unknown>(`/api/catalog/drafts/${seg(draftId)}/tasks/${seg(taskId)}`, body)
 }
 
 export async function putGroup(draftId: string, slug: string, body: GroupRequest): Promise<void> {
-  await request<unknown>('PUT', `/api/catalog/drafts/${seg(draftId)}/groups/${seg(slug)}`, body)
+  await api.put<unknown>(`/api/catalog/drafts/${seg(draftId)}/groups/${seg(slug)}`, body)
 }
 
 export async function putGroupsIndex(draftId: string, groups: string[]): Promise<void> {
   const body: GroupsIndexRequest = { groups }
-  await request<unknown>('PUT', `/api/catalog/drafts/${seg(draftId)}/groups-index`, body)
+  await api.put<unknown>(`/api/catalog/drafts/${seg(draftId)}/groups-index`, body)
 }
 
 /** Publishes a draft; resolutions is empty for the first attempt. */
 export function publishDraft(draftId: string, resolutions: Record<string, ResolutionJSON>): Promise<PublishResponse> {
   const body = Object.keys(resolutions).length > 0 ? { resolutions } : {}
-  return request<PublishResponse>('POST', `/api/catalog/drafts/${seg(draftId)}/publish`, body)
+  return api.post<PublishResponse>(`/api/catalog/drafts/${seg(draftId)}/publish`, body)
 }
 
 /* ---------- processors, runs, dry runs (internal/runs/api.go) ---------- */
 
 export async function listProcessors(): Promise<ProcessorInfo[]> {
-  return (await request<ProcessorInfo[] | null>('GET', '/api/processors')) ?? []
+  return (await api.get<ProcessorInfo[] | null>('/api/processors')) ?? []
 }
 
 export async function listWorkspaces(): Promise<WorkspaceSummary[]> {
-  return (await request<WorkspaceSummary[] | null>('GET', '/api/workspaces')) ?? []
+  return (await api.get<WorkspaceSummary[] | null>('/api/workspaces')) ?? []
 }
 
 export async function listRuns(workspace: string): Promise<RunRecord[]> {
-  return (await request<RunRecord[] | null>('GET', `/api/workspaces/${seg(workspace)}/runs`)) ?? []
+  return (await api.get<RunRecord[] | null>(`/api/workspaces/${seg(workspace)}/runs`)) ?? []
 }
 
 export function retryRun(workspace: string, run: string): Promise<RunRecord> {
-  return request<RunRecord>('POST', `/api/workspaces/${seg(workspace)}/runs/${seg(run)}/retry`)
+  return api.post<RunRecord>(`/api/workspaces/${seg(workspace)}/runs/${seg(run)}/retry`)
 }
 
-/** The run's log (the processor's stderr), as text. */
+/**
+ * The run's log (the processor's stderr), as text. Calls fetch directly
+ * (the endpoint answers text/plain, which the JSON client cannot return),
+ * but still attaches the same Authorization: Bearer header client.ts uses
+ * in token-only mode (api/token.ts's getToken()), so the log request is
+ * not left unauthenticated under a pasted token — found during cross-plan
+ * review once 4c's client.ts (which does attach that header) was readable.
+ */
 export async function getRunLog(workspace: string, run: string): Promise<string> {
+  const token = getToken()
+  const headers: Record<string, string> = { Accept: 'text/plain' }
+  if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(`/api/workspaces/${seg(workspace)}/runs/${seg(run)}/log`, {
     credentials: 'include',
-    headers: { Accept: 'text/plain' },
+    headers,
   })
   const text = await res.text()
   if (!res.ok) {
@@ -536,11 +555,11 @@ export async function getRunLog(workspace: string, run: string): Promise<string>
 }
 
 export function startDryRun(name: string, image: string): Promise<DryRunStarted> {
-  return request<DryRunStarted>('POST', `/api/processors/${seg(name)}/dry-run`, { image })
+  return api.post<DryRunStarted>(`/api/processors/${seg(name)}/dry-run`, { image })
 }
 
 export function getDryRun(id: string): Promise<DryRunReport> {
-  return request<DryRunReport>('GET', `/api/dry-runs/${seg(id)}`)
+  return api.get<DryRunReport>(`/api/dry-runs/${seg(id)}`)
 }
 
 /* ---------- base64 text (merge conflicts and resolutions carry []byte) ---------- */
@@ -679,12 +698,12 @@ Nothing else in the file changes.
 In `web/src/App.vue`, inside the top `<nav>` element, after the last engineer link (or the last `RouterLink` in the nav, if 4c groups them differently), insert:
 
 ```vue
-      <RoleGate role="task_author">
+      <RoleGate role="task-author">
         <RouterLink to="/catalog/drafts" class="rounded px-3 py-2 hover:bg-gray-100" active-class="font-semibold">
           Catalog drafts
         </RouterLink>
       </RoleGate>
-      <RoleGate role="processor_author">
+      <RoleGate role="processor-author">
         <RouterLink to="/processors" class="rounded px-3 py-2 hover:bg-gray-100" active-class="font-semibold">
           Processors
         </RouterLink>
@@ -1307,13 +1326,11 @@ with
     path: '/catalog/drafts',
     name: 'catalog-drafts',
     component: () => import('../views/taskauthor/DraftsView.vue'),
-    meta: { requiresAuth: true },
   },
   {
     path: '/catalog/drafts/:draftId',
     name: 'catalog-draft',
     component: () => import('../views/taskauthor/DraftsView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -1886,7 +1903,6 @@ with
     path: '/catalog/drafts/:draftId/groups/:slug',
     name: 'catalog-draft-group',
     component: () => import('../views/taskauthor/GroupTreeView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -2234,7 +2250,6 @@ with
     path: '/catalog/drafts/:draftId/tasks/:taskId',
     name: 'catalog-draft-task',
     component: () => import('../views/taskauthor/TaskEditorView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -2610,7 +2625,6 @@ with
     path: '/processors',
     name: 'processors',
     component: () => import('../views/processorauthor/RegistryView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -2917,7 +2931,6 @@ with
     path: '/processors/:name/runs',
     name: 'processor-runs',
     component: () => import('../views/processorauthor/RunsView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -3237,7 +3250,6 @@ with
     path: '/processors/:name/dry-run',
     name: 'processor-dry-run',
     component: () => import('../views/processorauthor/DryRunView.vue'),
-    meta: { requiresAuth: true },
   },
   // plan 4d: later tasks insert their routes above this line
 ```
@@ -3290,9 +3302,9 @@ git commit -m "Add the dry-run view that polls a dry run until it finishes"
 
 Each line: decision — reason — cost if wrong.
 
-- **One endpoint module, `web/src/api/authors.ts`**, is the only file importing plan 4c's client, and assumes `request<T>(method, path, body?)` + `ApiError{status, body}` — the note fixes the client's behaviour but not its exports; concentrating the dependency makes adapting it a five-line edit — if 4c exports e.g. `api.get/post/put/del`, `authors.ts`'s calls change, nothing else.
-- **`getRunLog` calls `fetch` directly** (same-origin, `credentials: 'include'`) — the log endpoint answers `text/plain` and the note's client is "JSON in/out" — if 4c authenticates the SPA by an `Authorization` header (token-paste mode), the log request is unauthenticated (401) until it gets the same header. **Open question for the reviewer.**
-- **Assumed 4b response shapes** (see "Assumed surface"): `Draft` in snake_case lower-case JSON with `author: {name, email}`, and `GET /api/catalog/drafts/{id}` = `{draft, catalog: <GET /api/catalog shape>, problems}` — the note says "its branch's catalog, decoded with catalog.Load, plus problems" but not the JSON; reusing `catalogJSON`'s shape is the obvious choice (but `catalogToJSON` is unexported in `internal/api`, so 4b must either export it or copy it) — a different shape changes `DraftDetail` and the three views reading `detail.catalog`. **Open question for the reviewer.**
+- **One endpoint module, `web/src/api/authors.ts`**, is the only file importing plan 4c's client. **Resolved by cross-plan review:** 4c's `client.ts` actually exports an `api` object (`api.get/post/put/del`), not the standalone `request<T>(method, path, body?)` function this plan originally assumed; `authors.ts`'s calls have been rewritten accordingly (Task 1, Step 3) — exactly the five-line adaptation this decision's own reasoning anticipated.
+- **`getRunLog` calls `fetch` directly** (same-origin, `credentials: 'include'`). **Resolved by cross-plan review:** 4c's `client.ts` does authenticate the SPA by an `Authorization: Bearer` header in token-only mode (`api/token.ts`'s `getToken()`), so `getRunLog` now attaches the same header itself; without this it would 401 under a pasted token exactly as this decision's "cost if wrong" predicted.
+- **Assumed 4b response shapes** (see "Assumed surface"): `Draft` in snake_case lower-case JSON with `author: {name, email}`, and `GET /api/catalog/drafts/{id}` = `{draft, catalog: <GET /api/catalog shape>, problems}`. **Confirmed correct by cross-plan review** against 4b's actual `internal/catalogdraft/http.go` (`draftJSON`, `draftViewJSON`): the guess matches byte-for-byte, including that `catalog` is the same shape `GET /api/catalog` returns (4b exports `api.CatalogJSON` for exactly this reuse). No change needed to `DraftDetail` or the views reading `detail.catalog`.
 - **`/catalog/drafts/:draftId` renders `DraftsView`** (list plus the selected draft's detail, problems, tasks and publish) — the note lists the route but no view for it; a separate DraftView would duplicate the list — the list is always visible above the detail.
 - **`:slug` = `-` means "no group selected"** in `GroupTreeView` — `DraftsView` must link to the group editor even when the catalog has no group, and the note's route requires a slug; `-` can never be a slug (`slugRE` requires `[a-z0-9]` first) — none, beyond an odd-looking URL.
 - **`GroupTreeView` edits both the top-level order (`groups-index`) and one group** (`:slug`) on one page — the note says the view calls both endpoints and gives it one route — the page has two save buttons.
@@ -3315,10 +3327,10 @@ Each line: decision — reason — cost if wrong.
 - **The candidate image is validated client-side** with `runs.pinnedImageRE`'s pattern and prefilled with the registered image — immediate feedback; the server re-checks — if the server pattern changes the client is stricter or looser until updated (the server's 400 is still shown).
 - **Retry is offered in `RunsView` for failed runs** — §7 "failed runs … can be retried"; 3d's endpoint exists — plan 4a may gate it by workspace engineer role; the 403 message is then shown to a processor-author.
 - **Role gating is per view (`useAuthorRole`, admin implies the role) and per nav entry (`RoleGate`)**, not a route guard — the note's router guard handles only "signed in?"; a view-level check renders a clear message and makes no request (no 403 noise) — the role logic exists twice (RoleGate in 4c, `useAuthorRole` here); they must agree on "admin implies".
-- **Routes carry `meta: { requiresAuth: true }`** — assumed to be 4c's guard key — if 4c uses another key, an unauthenticated user sees the "needs the … role" message instead of being sent to sign in.
+- **Routes carry `meta: { requiresAuth: true }`** — assumed to be 4c's guard key. **Resolved by cross-plan review:** 4c's actual router guard (`router/index.ts`) works the other way around — it checks `to.meta.public` as an *opt-out* of a default that already requires auth (`if (to.meta.public) return true; if (auth.mode === 'authenticated') return true; ...`), and has no `requiresAuth` key at all. A route with no `meta` already requires auth under 4c's guard, so `meta: { requiresAuth: true }` was inert (harmless, but documented a false assumption); it has been removed from every route in `authorRoutes` (Task 1, Step 4, and the route-adding steps of Tasks 3, 6 and 8) rather than left as dead, misleading configuration.
 - **Route names** `catalog-drafts`, `catalog-draft`, `catalog-draft-group`, `catalog-draft-task`, `processors`, `processor-runs`, `processor-dry-run`; links between views use path strings — names are needed for `router.push` within `DraftsView`; path-string links let earlier tasks link to routes later tasks add without `router.resolve` throwing — none.
 - **Type files are named `taskAuthor.ts` and `processorAuthor.ts`** — avoids colliding with whatever names 4c uses (`catalog.ts`, `proposals.ts`, …) when the plans are applied together — `ProposalItem` may duplicate 4c's mirror of `runs.ItemJSON` (used by its `ProposalsView`); the reviewer may dedupe.
-- **No UI for editing `processors.yaml`** (`PUT /api/catalog/drafts/{id}/processors`) — the note assigns `RegistryView` only `GET /api/processors`, and §6.1's Processor-Author list has no registry editor; the endpoint is task-author-gated — changing a digest or binding still goes through Git on a draft branch. **Open question for the reviewer:** whether any plan was meant to cover it.
+- **No UI for editing `processors.yaml`** (`PUT /api/catalog/drafts/{id}/processors`) is a **deliberate, decided gap, not an open question.** Spec §6.1's Processor-Author bullet (and §5.7, which it mirrors) lists only "registry list, run history and logs, dry run" — no registry editor. No plan in 4a-4d assigns that endpoint a view: 4b exposes it (correctly task-author-gated, since binding a task to a processor is a catalog-content edit, not a processor-author action), but the only UI this phase builds for processors is `RegistryView`'s read-only `GET /api/processors` list. Confirmed during cross-plan review by reading all four plans together: this is phase 4's explicit scope boundary, not a dropped ball — changing a digest or a task/processor binding still works today, through Git on a draft branch (or a plain commit to `catalog.git`), exactly as before this phase existed.
 
 ## Rulings for spec §11.4
 
@@ -3331,3 +3343,7 @@ Rulings this plan makes (numbers assigned by the phase-4 controller when recordi
 5. (4d) Dry-run reports are polled every 2 s until `succeeded` or `failed`; a 404 means the job was forgotten by a restart (ruling 3.10) and stops polling; three consecutive errors stop polling until the user resumes. The job id is kept in the page URL.
 6. (4d) A processor's run history is assembled in the browser from every workspace's run list (no per-processor endpoint), refreshed every 5 s while any of its runs is queued or running.
 7. (4d) Author views check the role themselves (admin implies it) and render a message instead of calling the API when it is missing; the navigation hides sections the principal cannot use.
+8. (4d) `api/authors.ts` calls plan 4c's client through `api.get/post/put/del`, not a standalone `request()` function; `getRunLog` attaches the same `Authorization: Bearer` header `client.ts` uses in token-only mode. Both fixed during cross-plan review against 4c's actual code.
+9. (4d) `RoleGate`'s `role` prop and the nav links in `App.vue` use the hyphenated role strings (`task-author`, `processor-author`) that mirror `internal/auth`'s own role names, not the `/auth/me` JSON field names; `useAuthorRole` (a separate, view-level check) is unaffected, since it reads the JSON field names directly. Fixed during cross-plan review against 4c's actual `RoleGate.vue`.
+10. (4d) `authorRoutes`' routes carry no router `meta` at all; 4c's guard already requires auth by default and opts a route out via `meta: { public: true }`, so the `meta: { requiresAuth: true }` this plan originally wrote was inert and has been removed. Fixed during cross-plan review against 4c's actual `router/index.ts`.
+11. (4d) Editing `processors.yaml` through the web UI is out of scope for phase 4, confirmed against spec §6.1/§5.7's Processor-Author bullet (registry list, run history/logs, dry run — no registry editor); `PUT /api/catalog/drafts/{id}/processors` remains reachable only through Git on a draft branch.

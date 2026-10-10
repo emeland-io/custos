@@ -95,6 +95,7 @@ If a signature or shape differs from what is written here once 4a/4b actually la
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
@@ -105,6 +106,13 @@ If a signature or shape differs from what is written here once 4a/4b actually la
   }
 }
 ```
+
+`@types/node` (not in an earlier draft of this plan) is needed because
+`vite.config.ts` calls `process.cwd()` — found while applying this plan
+to a scratch copy: `npm run type-check` fails with "Cannot find name
+'process'" without it, and `tsconfig.json`'s `"types"` array (above) must
+also list `"node"`, since that array restricts which `@types/*` packages
+TypeScript auto-includes.
 
 `web/vite.config.ts` — the dev proxy to `CUSTOS_DEV_BACKEND` the architecture note's Conventions require:
 
@@ -152,17 +160,17 @@ export default defineConfig(({ mode }) => {
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client", "node"]
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
 }
 ```
 
-`web/tailwind.config.js` (Tailwind v3's conventional config file — see "Decisions" §1 for why v3, not v4):
+`web/tailwind.config.js` (Tailwind v3's conventional config file — see "Decisions" §1 for why v3, not v4). Written as an ES module (`export default`, not `module.exports`): `web/package.json` declares `"type": "module"`, so Node and Vite load a `.js` file here as an ES module — found while applying this plan to a scratch copy, `vite build` failed with "module is not defined in ES module scope" against the original `module.exports` form:
 
 ```js
 /** @type {import('tailwindcss').Config} */
-module.exports = {
+export default {
   content: ['./index.html', './src/**/*.{vue,ts}'],
   theme: {
     extend: {},
@@ -171,10 +179,10 @@ module.exports = {
 }
 ```
 
-`web/postcss.config.js`:
+`web/postcss.config.js` (same fix, same reason):
 
 ```js
-module.exports = {
+export default {
   plugins: {
     tailwindcss: {},
     autoprefixer: {},
@@ -288,11 +296,13 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 package webui
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
 	"net/http"
 	"path"
 	"strings"
+	"time"
 )
 
 //go:embed dist
@@ -314,8 +324,14 @@ func Handler() (http.Handler, error) {
 	}
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// path.Clean("/") is "/", and TrimPrefix(..., "/") of that is ""
+		// (not "."): an earlier version of this handler checked only for
+		// "." and so never matched a bare "/" at all, 404ing the root —
+		// found while applying this plan to a scratch copy
+		// (TestHandlerServesIndexAtRoot failed). "" and "." both mean
+		// "serve index.html".
 		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if p == "." {
+		if p == "" || p == "." {
 			p = "index.html"
 		}
 		if _, err := fs.Stat(sub, p); err != nil {
@@ -323,16 +339,32 @@ func Handler() (http.Handler, error) {
 				http.NotFound(w, r)
 				return
 			}
-			shell := new(http.Request)
-			*shell = *r
-			u := *r.URL
-			u.Path = "/index.html"
-			shell.URL = &u
-			files.ServeHTTP(w, shell)
+			serveIndex(w, r, sub)
 			return
 		}
 		files.ServeHTTP(w, r)
 	}), nil
+}
+
+// serveIndex writes dist/index.html directly, rather than routing a
+// crafted "/index.html" request through http.FileServer: FileServer's own
+// serveFile has a built-in redirect for any request whose path ends in
+// "/index.html" (a 301 to the canonical directory URL, meant for a real
+// browser following links) — found while applying this plan to a scratch
+// copy (TestHandlerFallsBackToIndexForAClientRoute got a 301 instead of
+// the SPA shell): that redirect fired for every client-side route (e.g.
+// /w/<id>) instead of this handler's intended "serve the SPA shell"
+// fallback. An earlier version of this function built a shell *http.Request
+// with its URL.Path set to "/index.html" and routed it through files
+// (http.FileServer); this version reads and serves the bytes directly
+// instead.
+func serveIndex(w http.ResponseWriter, r *http.Request, sub fs.FS) {
+	data, err := fs.ReadFile(sub, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(data))
 }
 ```
 
@@ -512,19 +544,23 @@ Add the import and wire `webui.Handler()` right after `srv.WithAPI(a.Handler())`
 }
 ```
 
-Correct `--addr`'s usage text (ruling 4.15 — this plan is explicitly where the architecture note assigns this fix) and the stale doc comment on `defaultAddr`:
+**Cross-plan note (resolved during review):** the architecture note's prose
+originally assigned the `--addr` usage-text correction to this plan, but
+plan 4a's own Task 8 makes the sentence false first (real auth lands in
+4a) and already corrects the flag's usage string there, with its own
+wording. By the time this plan's implementer reaches this step, that
+string will already have been changed by 4a's commit, so re-applying the
+block below as a second, conflicting edit is a no-op for the flag text —
+**do not re-edit `addr := fl.String(...)`'s usage string; it is already
+done.** What 4a's Task 8 does *not* touch is `defaultAddr`'s doc comment,
+which is `cmd/custos/serve.go`'s other stale "there is no authentication
+yet" claim; fixing only that comment is this plan's real, remaining piece
+of ruling 4.15:
 
 ```go
 // defaultAddr listens on loopback only, the conservative default for a
 // server that is not deliberately placed behind a reverse proxy.
 const defaultAddr = "127.0.0.1:8080"
-```
-
-```go
-	addr := fl.String("addr", envOr("CUSTOS_ADDR", defaultAddr),
-		"listen address (env CUSTOS_ADDR); requests are authenticated by internal/auth "+
-			"(session cookie, personal access token, or Basic auth with a token) — "+
-			"keep it on loopback or behind a trusted reverse proxy regardless")
 ```
 
 ### `Makefile`
@@ -615,7 +651,9 @@ export interface ErrorBody {
 }
 ```
 
-`web/src/types/auth.ts` — mirrors plan 4a's `GET /auth/me` body:
+`web/src/types/auth.ts` — mirrors plan 4a's `GET /auth/me` body, plus
+`GET /auth/config` (architecture note ruling 18, added during cross-plan
+review as the token-only-mode signal `stores/auth.ts` needs):
 
 ```ts
 export interface Roles {
@@ -629,6 +667,10 @@ export interface Principal {
   name: string
   email: string
   roles: Roles
+}
+
+export interface AuthConfig {
+  oidc: boolean
 }
 ```
 
@@ -670,6 +712,7 @@ export interface TaskStatus {
   version: string // current version
   title: string
   answer_type: AnswerType
+  choices?: string[] // present when answer_type is 'choice'; plan 4b, Task 8
   generated: boolean
   state: TaskState
   answer: Answer | null
@@ -1137,7 +1180,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 import { defineStore } from 'pinia'
 import { api, ApiError } from '../api/client'
 import { setToken, clearToken } from '../api/token'
-import type { Principal } from '../types/auth'
+import type { Principal, AuthConfig } from '../types/auth'
 
 export type AuthMode = 'loading' | 'authenticated' | 'unauthenticated' | 'token-only'
 
@@ -1149,21 +1192,31 @@ export const useAuthStore = defineStore('auth', {
     mode: 'loading' as AuthMode,
   }),
   actions: {
-    // init loads the caller's identity from GET /auth/me. A 404 means
-    // OIDC is not configured (architecture note, Plan 4c — see this
-    // plan's "Decisions" §3 for a tension with Plan 4a's own endpoint
-    // table, flagged there for the cross-plan reviewer).
+    // init loads GET /auth/config first (always 200, unauthenticated) to
+    // learn whether OIDC is configured, then GET /auth/me for the caller's
+    // identity. /auth/me always answers 401 when there is no caller,
+    // whether or not OIDC is on — it never signals token-only mode by
+    // status code (architecture note ruling 18, added during cross-plan
+    // review: 4a's own endpoint table only ever documented 401 here, which
+    // disagreed with an earlier draft of this plan that read a 404 as the
+    // token-only signal; /auth/config is the fix, not a change to this
+    // endpoint's semantics).
     async init(): Promise<void> {
+      let oidc = true
+      try {
+        oidc = (await api.get<AuthConfig>('/auth/config')).oidc
+      } catch {
+        // /auth/config itself failing is unexpected; default to assuming
+        // OIDC is configured, which sends an unauthenticated user to the
+        // real /auth/login redirect (the safer of the two failure modes).
+      }
       try {
         this.principal = await api.get<Principal>('/auth/me')
         this.mode = 'authenticated'
       } catch (err) {
         this.principal = null
-        if (err instanceof ApiError && err.status === 404) {
-          this.mode = 'token-only'
-        } else {
-          this.mode = 'unauthenticated'
-        }
+        if (!(err instanceof ApiError)) throw err
+        this.mode = oidc ? 'unauthenticated' : 'token-only'
       }
     },
 
@@ -1744,10 +1797,11 @@ const taskId = computed(() => route.params.taskId as string)
 
 const task = ref<TaskStatus | null>(null)
 const history = ref<TaskHistory | null>(null)
-// historyUnavailable is also true for a generated task: there is no
-// endpoint exposing a generated task's body/choices (see this plan's
-// "Decisions" §7 — an open question for the cross-plan reviewer, not
-// resolved here by inventing one).
+// historyUnavailable is also true for a generated task: there is still no
+// endpoint exposing a generated task's body (title/answer_type/choices are
+// now carried by GET /api/workspaces/{id}/status itself — plan 4b, Task 8
+// — which is enough to render and answer a choice-type generated task; the
+// task's descriptive body text remains catalog-tasks-only).
 const historyUnavailable = ref(false)
 
 const value = ref('')
@@ -1792,7 +1846,9 @@ const currentVersion = computed<TaskVersion | undefined>(() =>
 const answeredVersion = computed<TaskVersion | undefined>(() =>
   history.value?.versions.find((v) => v.version === task.value?.answer?.task_version),
 )
-const choices = computed(() => currentVersion.value?.choices ?? [])
+// currentVersion.choices covers a catalog task; task.choices (status.ts,
+// plan 4b Task 8) covers a generated task, which has no TaskHistory.
+const choices = computed(() => currentVersion.value?.choices ?? task.value?.choices ?? [])
 
 const showDiff = computed(
   () => !!currentVersion.value && !!answeredVersion.value && currentVersion.value.version !== answeredVersion.value.version,
@@ -1950,8 +2006,7 @@ function goBack() {
           <option v-for="c in choices" :key="c" :value="c">{{ c }}</option>
         </select>
         <p v-if="!choices.length" class="text-sm text-amber-700">
-          No choices are available for this task yet (generated choice tasks have no detail endpoint — see this
-          plan's open question). Saving is disabled.
+          No choices are recorded for this task. Saving is disabled.
         </p>
       </template>
 
@@ -2311,11 +2366,22 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 1. **npm package versions.** `vue@^3.5.13`, `vue-router@^4.5.0`, `pinia@^2.3.0`, `vite@^6.0.7`, `@vitejs/plugin-vue@^5.2.1`, `typescript@~5.7.3`, `vue-tsc@^2.2.0`, `tailwindcss@^3.4.17`, `postcss@^8.4.49`, `autoprefixer@^10.4.20`. These are mutually compatible, actively maintained lines as of this plan's writing. **Tailwind is pinned to v3, not v4**, specifically because the architecture note's own file tree names `tailwind.config.js` as a fixed file for plan 4c — that is the conventional v3 (and PostCSS-plugin) setup; Tailwind v4's idiomatic flow is CSS-first (`@import "tailwindcss"` plus `@theme`, no JS config file by default), which would make a committed `tailwind.config.js` either dead or require the unusual `@config` import directive. Pinning v3 keeps the note's named file meaningful without inventing a nonstandard v4 setup. The executing engineer should run `npm install` with network access to generate the real `package-lock.json`; the exact resolved versions it pins may be slightly newer patches, which is fine.
 2. **Root route "/".** The architecture note's route table starts at `/login` and `/w/:id` and does not list a bare `/`; but `DashboardView.vue`'s own comment ("workspace picker + GET status") implies a picker must exist somewhere before a workspace is chosen. Rather than add an undocumented view file, `/` and `/w/:id` share `DashboardView.vue`: without an `:id` param it renders the picker, with one it renders that workspace's dashboard.
-3. **`GET /auth/me` 404 vs. 401.** Plan 4a's own endpoint table documents only `GET /auth/me` → principal or 401. Plan 4c's text (the `LoginView.vue` file-tree comment) says the token-only-mode fallback shows "when GET /auth/me 404s because OIDC is off" — a 404, not a 401. This plan follows 4c's literal text (its own section) and treats a 404 specifically as the token-only-mode signal, distinct from a plain 401 (session/token present-but-invalid, OIDC still configured, which the router guard sends to a real `/auth/login` redirect instead of the SPA's own `/login`). **This is flagged for the cross-plan reviewer**: confirm plan 4a's `Register` actually emits 404 from `/auth/me` in token-only mode (e.g. by never registering the route, or by returning 404 explicitly when `cfg.OIDC == nil` and no session/token resolves) rather than always 401; if 4a only ever returns 401, `stores/auth.ts`'s `init()` branch on `err.status === 404` needs to become the real signal 4a actually sends (possibly inspecting a response header or a distinct body instead).
+3. **`GET /auth/me` 404 vs. 401 — resolved by cross-plan review.** An
+   earlier draft of this plan read a 404 from `/auth/me` as the
+   token-only-mode signal, which plan 4a's endpoint table never actually
+   sent (4a's `/auth/me` always 401s when there is no caller, OIDC
+   configured or not). The fix is a new, unauthenticated `GET /auth/config`
+   → `{"oidc": bool}` endpoint (architecture note ruling 18, added to plan
+   4a), which `stores/auth.ts`'s `init()` (Task 6, above) now calls first
+   to learn whether OIDC is configured, before ever looking at `/auth/me`'s
+   status. `LoginView.vue`'s token-only-mode fallback (Task 8, below) is
+   unchanged: it still renders whenever `auth.mode === 'token-only'`, which
+   `init()` now sets correctly from `/auth/config` rather than from a 404
+   that was never actually sent.
 4. **Two small hand-rolled helpers beyond the fixed file list**: `src/lib/diff.ts` (line diff for the task-version diff) and `src/lib/markdown.ts` (a safe Markdown-subset renderer). No diff or Markdown-rendering npm package is added; this generalizes the spirit of ruling 4.16 (no casual new frontend dependency) beyond its literal drag-and-drop/graph wording.
 5. **`ProposalsView.vue` renders two distinct kinds of proposal in one file.** `GET /api/workspaces/{id}/proposals` (pin proposals, `PinProposal`/`Diff`) and `GET /api/workspaces/{id}/processor-proposals` (`ProposalJSON`/`ItemJSON`) are genuinely different endpoints with different bodies and different accept/reject contracts (`{"branch"}` vs. `{"items":[...]}` with `"<kind>:<match_key>"` selectors, confirmed against `internal/proposal/diff.go`'s `selector` function). The architecture note names one view file for both; this plan keeps that one file but renders them as two independent sections rather than forcing a shared list component over incompatible shapes.
 6. **`src/api/token.ts` as a standalone module.** `api/client.ts` needs to read the token-only-mode bearer token; `stores/auth.ts` needs to set/clear it. Making `client.ts` depend on the Pinia store (or vice versa) would create a circular import, so the token itself lives in a tiny non-reactive module both import.
-7. **No endpoint exposes a generated task's title/body/choices** — only `GET /api/catalog/tasks/{id}` exists, and only for catalog tasks (`internal/api/catalog.go`). `AnswerView.vue` therefore shows a generated task using only what `GET /api/workspaces/{id}/status` already carries (title, answer type, state) and disables saving a generated `choice`-type task with an explanatory message, rather than inventing a new endpoint not named in the architecture note. **Flagged as an open question for the cross-plan reviewer**: this is a real functional gap (an engineer cannot answer a generated choice task through the UI at all), and belongs on either a later plan or a follow-up, not solved unilaterally here.
+7. **No endpoint exposes a generated task's title/body/choices — resolved by cross-plan review for `choices` specifically.** Only `GET /api/catalog/tasks/{id}` exists, and only for catalog tasks (`internal/api/catalog.go`); a generated task still has no detail endpoint for its descriptive body text. But `choices` was a real, blocking gap (an engineer could not answer a generated `choice`-type task at all), fixed by adding `Choices` to `status.TaskStatus`/`taskStatusJSON` directly (plan 4b, Task 8) — every task, generated or catalog, is already in that response. `AnswerView.vue`'s `choices` computed now falls back to `task.choices` from the status response when there is no `TaskHistory` (see Task 10, above); the save-disabled message is adjusted to a plain "no choices are recorded" rather than citing a missing endpoint that no longer applies. The task's descriptive *body* text for a generated task remains unavailable, which is a smaller, non-blocking gap (the form still renders and saves) left for a follow-up.
 8. **No single-workspace `GET` endpoint exists** (`internal/api/workspaces.go` only has list and create). `BookView.vue` and `DashboardView.vue`'s picker both read a workspace's `frozen`/`pin` by filtering `GET /api/workspaces`'s list client-side, rather than assuming a detail endpoint.
 9. **One `tsconfig.json`**, not the common Vite-template split into an app config and a `tsconfig.node.json` for `vite.config.ts`. At this project's scale (a "few hundred tasks" per spec §1, a small frontend to match) the extra file bought little; `vite.config.ts` is included directly in the one config's `include` list.
 10. **`timestamp` answer type uses a plain text input plus a "now" button**, not `<input type="datetime-local">`. The native control's value format (`YYYY-MM-DDTHH:mm`, no timezone, no seconds) does not match the ISO-8601-with-`Z` style the rest of the system seems to expect, and converting between the two formats client-side risked subtly corrupting a saved timestamp. A plain text field keeps exactly what the engineer types.
@@ -2328,6 +2394,10 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 1. `internal/webui.Handler` 404s a request whose last path segment contains a "." when `dist` lacks that file, instead of falling back to `index.html`, so a stale or mistyped asset URL is visible as a 404 rather than a blank page trying to parse HTML as JavaScript or CSS.
 2. The SPA's `/` and `/w/:id` routes share one component, `DashboardView.vue`: without an `:id` it renders a workspace picker, with one it renders that workspace's dashboard — no separate picker view file was introduced, since the architecture note's route table did not list a root route.
 3. The frontend takes on two small hand-rolled helpers outside the architecture note's named file list — `src/lib/markdown.ts` (a safe Markdown subset renderer) and `src/lib/diff.ts` (a line diff) — instead of a Markdown or diff npm dependency, extending the no-casual-new-frontend-dependency posture of ruling 4.16 beyond its literal drag-and-drop/graph wording.
-4. A `GET /auth/me` 404 (not only 401) is read as the token-only-mode signal, per this plan's own text in the architecture note; this is flagged as a possible gap against plan 4a's endpoint table, which documents only 401, pending confirmation once 4a's code actually exists.
-5. `ProposalsView.vue` renders both processor-output proposals (phase 3d) and catalog pin-update proposals (phase 2c) as two sections of one view and route, since they come from distinct endpoints with distinct accept/reject bodies, rather than one shared list component forced over two incompatible shapes.
-6. Generated tasks cannot be fully answered through the UI yet: no endpoint exposes a generated task's title, body or `choices` (only `GET /api/catalog/tasks/{id}`, catalog tasks only, does). `AnswerView.vue` degrades to title-only display and disables saving a generated `choice`-type task rather than inventing an endpoint; a follow-up plan should add one.
+4. Token-only mode is signalled to the frontend by `GET /auth/config`'s `{"oidc": false}`, not by a 404 from `GET /auth/me` (which always 401s when there is no caller); resolved during cross-plan review (architecture note ruling 18).
+5. `taskStatusJSON`/`status.TaskStatus` gain a `Choices` field (plan 4b, Task 8), so `AnswerView.vue` renders a generated `choice`-type task's options from `GET /api/workspaces/{id}/status` directly, without needing a new catalog-task-detail endpoint for generated tasks.
+6. `ProposalsView.vue` renders both processor-output proposals (phase 3d) and catalog pin-update proposals (phase 2c) as two sections of one view and route, since they come from distinct endpoints with distinct accept/reject bodies, rather than one shared list component forced over two incompatible shapes.
+7. A generated task's descriptive body text is still unavailable through the UI (only `GET /api/catalog/tasks/{id}`, catalog tasks only, exposes one) — a smaller, non-blocking gap than the `choices` one ruling 5 closes, since the form still renders and saves; left for a follow-up.
+8. `web/package.json` takes `@types/node` as a devDependency, and `web/tsconfig.json`'s `"types"` array lists `"node"` alongside `"vite/client"`, because `vite.config.ts` calls `process.cwd()`; found missing while applying this plan to a scratch copy (`npm run type-check` failed with "Cannot find name 'process'" without it).
+9. `web/tailwind.config.js` and `web/postcss.config.js` are written as ES modules (`export default`), not CommonJS (`module.exports`): `web/package.json` declares `"type": "module"`, so Node and Vite load a `.js` file here as an ES module, and the CommonJS form this plan originally wrote failed `vite build` outright ("module is not defined in ES module scope") — found while applying this plan to a scratch copy.
+10. `internal/webui.Handler`'s SPA-shell fallback writes `dist/index.html`'s bytes directly (`http.ServeContent`) instead of routing a crafted `/index.html` request through `http.FileServer`, and its root-path check is `p == "" || p == "."`, not `p == "."` alone — both found while applying this plan to a scratch copy, where the original code 404d the literal root path and 301-redirected every other client-side route instead of serving the SPA shell (`http.FileServer` has its own built-in redirect for any request path ending in "/index.html"). This was a critical functional bug: as originally written, the embedded single-page application never actually loaded.

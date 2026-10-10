@@ -273,9 +273,12 @@ package store
 
 import (
 	"io/fs"
+	"slices"
+	"strings"
 	"testing/fstest"
 
 	"github.com/emeland-io/custos/internal/gitrepo"
+	"github.com/emeland-io/custos/internal/problem"
 	"github.com/emeland-io/custos/internal/rules"
 )
 
@@ -295,8 +298,29 @@ const catalogLockKey = "catalog"
 // not validated here at all: a draft may be transiently invalid
 // (architecture note, ruling 4.13). The ref is moved with the expected old
 // value (ErrConflict when it moved).
+//
+// allowImmutableChange, found necessary while applying this plan to a
+// scratch copy (cross-plan review, Part 2): it names paths whose
+// immutability ("was changed") problem is not grounds to reject this
+// particular call. It exists only for catalogdraft.Publish's resolved-
+// merge-conflict case (Task 5) — a git push (which never passes it) is
+// checked exactly as before, with no exemption ever possible. Why this is
+// safe: an ordinary immutable-content rewrite is a *silent* one (nobody
+// asked about it, so rejecting it outright is correct); a path named here
+// arrives only because gitrepo.MergeTree already reported a genuine
+// conflict at it and a human explicitly chose a side through Publish's
+// res parameter — the catalog's one rule a workspace merge never had to
+// consider, now given the same "an explicit resolution overrides what
+// main had" treatment a workspace merge's conflict resolution already
+// gets. Every other immutability problem, and every other rule
+// CheckCatalogUpdate checks, still rejects exactly as before. (Without
+// this, TestPublishConflict's own "resolved with theirs" step below
+// cannot succeed: once the first draft's new version file is on main,
+// resolving the second draft's conflict at that exact path with "theirs"
+// necessarily asks to replace that path's content, which CheckImmutable
+// — correctly, for every *other* case — would otherwise reject.)
 func (s *Store) UpdateCatalog(ref string, author gitrepo.Signature, message string,
-	edit func(tree fs.FS) ([]gitrepo.Change, error)) (string, error) {
+	edit func(tree fs.FS) ([]gitrepo.Change, error), allowImmutableChange ...string) (string, error) {
 	repo := s.CatalogRepo()
 	if err := checkBranch(ref); err != nil {
 		return "", err
@@ -337,7 +361,7 @@ func (s *Store) UpdateCatalog(ref string, author gitrepo.Signature, message stri
 		return "", err
 	}
 	if ref == mainRef {
-		if err := s.validateCatalogMain(repo, old, commit); err != nil {
+		if err := s.validateCatalogMain(repo, old, commit, allowImmutableChange); err != nil {
 			return "", err
 		}
 	}
@@ -347,11 +371,24 @@ func (s *Store) UpdateCatalog(ref string, author gitrepo.Signature, message stri
 	return commit, nil
 }
 
-// validateCatalogMain applies the push rules to moving the catalog's main.
-func (s *Store) validateCatalogMain(repo *gitrepo.Repo, oldOID, newOID string) error {
+// validateCatalogMain applies the push rules to moving the catalog's main,
+// except that a "was changed" immutability problem at a path listed in
+// allowed is dropped rather than turned into a rejection (see
+// UpdateCatalog's allowImmutableChange; empty for every push-equivalent
+// caller, so this is a no-op there).
+func (s *Store) validateCatalogMain(repo *gitrepo.Repo, oldOID, newOID string, allowed []string) error {
 	ps, err := rules.CheckCatalogUpdate(repo, oldOID, newOID)
 	if err != nil {
 		return err
+	}
+	if len(allowed) > 0 {
+		ps = slices.DeleteFunc(ps, func(p problem.Problem) bool {
+			// Only a replaced path's problem is ever dropped, never a
+			// removed one: resolving a conflict with a side that deletes
+			// an already-published task version is not a case this
+			// exemption is meant to cover.
+			return p.Rule == problem.RuleImmutable && strings.Contains(p.Message, "was changed") && slices.Contains(allowed, p.Path)
+		})
 	}
 	if len(ps) > 0 {
 		return &RejectedError{Problems: ps}
@@ -1379,6 +1416,17 @@ func Publish(st *store.Store, id string, author gitrepo.Signature, res map[strin
 		return nil, err
 	}
 	message := fmt.Sprintf("Publish catalog draft %q", d.Title)
+	// allowedPaths names exactly the paths the caller explicitly resolved
+	// a conflict for (res's own keys): see store.UpdateCatalog's
+	// allowImmutableChange doc comment for why this, and only this, is
+	// exempt from the immutability check that otherwise applies to every
+	// publish (found while applying this plan to a scratch copy, Part 2
+	// of cross-plan review: TestPublishConflict's own "resolved with
+	// theirs" step cannot succeed without it).
+	allowedPaths := make([]string, 0, len(res))
+	for path := range res {
+		allowedPaths = append(allowedPaths, path)
+	}
 	commit, err := st.UpdateCatalog(mainRef, author, message, func(tree fs.FS) ([]gitrepo.Change, error) {
 		cat := st.CatalogRepo()
 		ours, ok, err := cat.ResolveRef(mainRef)
@@ -1427,7 +1475,7 @@ func Publish(st *store.Store, id string, author gitrepo.Signature, res map[strin
 			}
 		}
 		return diffFS(tree, desired)
-	})
+	}, allowedPaths...)
 
 	var ce *conflictsErr
 	if errors.As(err, &ce) {
@@ -1610,7 +1658,13 @@ Expected: PASS.
 
 ```go
 func TestCatalogJSONExported(t *testing.T) {
-	c := &catalog.Catalog{Groups: map[string]*catalog.Group{}}
+	// catalogToJSON dereferences c.Tasks unconditionally (it is always
+	// populated by catalog.Load); found while applying this plan to a
+	// scratch copy — the literal below needs a non-nil *task.Graph too,
+	// not just Groups, or CatalogJSON panics instead of returning a
+	// value. Add "github.com/emeland-io/custos/internal/task" to this
+	// test file's imports if not already present.
+	c := &catalog.Catalog{Groups: map[string]*catalog.Group{}, Tasks: &task.Graph{}}
 	if got := CatalogJSON(c, "deadbeef"); got == nil {
 		t.Fatal("CatalogJSON returned nil")
 	}
@@ -1700,9 +1754,34 @@ func newAPI(t *testing.T, st *store.Store) *api.API {
 		t.Fatal(err)
 	}
 	a := api.New(st, bl)
-	Register(a, st)
+	Register(a, st, nil)
 	return a
 }
+
+// newAPIWithOnPublish is newAPI, but wires onPublish so a test can confirm
+// it fires exactly on a successful publish and never on a conflict or
+// other error (cross-plan review, architecture note ruling 17).
+func newAPIWithOnPublish(t *testing.T, st *store.Store, onPublish func()) *api.API {
+	t.Helper()
+	bl, err := blobs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := api.New(st, bl)
+	Register(a, st, onPublish)
+	return a
+}
+
+// allCaller holds every role for every workspace — this file tests
+// catalogdraft's own endpoints, not authorization (auth.Require is plan
+// 4a's; found while applying this plan to a scratch copy: doJSON below
+// originally sent the pre-4a X-Custos-Author header, which the
+// task-author-gated routes this plan adds no longer read at all,
+// cascading 401s into every test in this file).
+type allCaller struct{ sig gitrepo.Signature }
+
+func (c allCaller) Signature() gitrepo.Signature      { return c.sig }
+func (c allCaller) Has(role, workspaceID string) bool { return true }
 
 func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -1716,7 +1795,7 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httpte
 		}
 		r = httptest.NewRequest(method, path, bytes.NewReader(data))
 	}
-	r.Header.Set("X-Custos-Author", "Alice Example <alice@example.org>")
+	r = r.WithContext(api.WithCaller(r.Context(), allCaller{sig: gitrepo.Signature{Name: "Alice Example", Email: "alice@example.org"}}))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
@@ -1803,7 +1882,13 @@ func TestHandleGroupEdit(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("group.yaml: ok=%v err=%v", ok, err)
 	}
-	if want := "title: Release (renamed)\nchildren:\n    - task: " + fixture.TaskB + "\n"; string(group) != want {
+	// 2-space list indentation, matching marshalYAML's SetIndent(2) and
+	// the project's own existing fixtures (internal/fixture.go's
+	// "children:\n  - task: ..." groups) — found while applying this
+	// plan to a scratch copy: the original "want" string here hardcoded
+	// 4 spaces, which go.yaml.in/yaml/v3 never actually produces at this
+	// indent setting.
+	if want := "title: Release (renamed)\nchildren:\n  - task: " + fixture.TaskB + "\n"; string(group) != want {
 		t.Errorf("group.yaml = %q, want %q", group, want)
 	}
 }
@@ -1815,14 +1900,34 @@ func TestHandleGroupInvalidSlug(t *testing.T) {
 	var d draftJSON
 	json.Unmarshal(w.Body.Bytes(), &d)
 
-	for _, slug := range []string{"../escape", "a/b", ""} {
+	// "../escape" and "a/b" never reach handleGroupEdit's own slugRE
+	// check at all: net/http's ServeMux, matching a single-segment
+	// {slug} wildcard, 404s "a/b" outright (an embedded "/" cannot be
+	// part of one segment) and 307-redirects "../escape" to its
+	// lexically-cleaned equivalent before any pattern is even matched —
+	// both stronger than a 400 from this handler, just enforced one
+	// layer earlier than Review Focus 4 assumed. Found while applying
+	// this plan to a scratch copy: the original table asserted 400 for
+	// these two and failed every time, against net/http's actual routing
+	// behavior, not against a gap in the handler.
+	for slug, want := range map[string]int{"../escape": http.StatusTemporaryRedirect, "a/b": http.StatusNotFound} {
 		w = doJSON(t, h, "PUT", "/api/catalog/drafts/"+d.ID+"/groups/"+slug, map[string]any{"title": "x"})
-		if slug == "" {
-			continue // the mux itself 404s an empty path segment
+		if w.Code != want {
+			t.Errorf("slug %q: %d %s, want %d (from net/http's own routing, before any handler runs)", slug, w.Code, w.Body, want)
 		}
+	}
+	// These single-segment slugs do reach handleGroupEdit, and must be
+	// rejected by its own slugRE check (400), independent of routing.
+	for _, slug := range []string{"UPPER", "a.b"} {
+		w = doJSON(t, h, "PUT", "/api/catalog/drafts/"+d.ID+"/groups/"+slug, map[string]any{"title": "x"})
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("slug %q: %d %s, want 400", slug, w.Code, w.Body)
 		}
+	}
+	// The mux itself 404s an empty path segment.
+	w = doJSON(t, h, "PUT", "/api/catalog/drafts/"+d.ID+"/groups/", map[string]any{"title": "x"})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("empty slug: %d %s, want 404", w.Code, w.Body)
 	}
 }
 
@@ -1861,6 +1966,32 @@ func TestHandlePublishConflict(t *testing.T) {
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("resolved publish: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestHandlePublishCallsOnPublish: onPublish fires exactly once per
+// successful publish, and not at all for the 409 a conflicting publish
+// answers first (architecture note ruling 17; cross-plan review).
+func TestHandlePublishCallsOnPublish(t *testing.T) {
+	st := setup(t)
+	calls := 0
+	h := newAPIWithOnPublish(t, st, func() { calls++ }).Handler()
+	w := doJSON(t, h, "POST", "/api/catalog/drafts", map[string]string{"title": "d"})
+	var d draftJSON
+	json.Unmarshal(w.Body.Bytes(), &d)
+	if w = doJSON(t, h, "PUT", "/api/catalog/drafts/"+d.ID+"/tasks/"+fixture.TaskA, map[string]any{
+		"step": "minor", "title": "t", "body": "Body.\n", "answer_type": "text",
+	}); w.Code != http.StatusOK {
+		t.Fatalf("task edit: %d %s", w.Code, w.Body)
+	}
+	if calls != 0 {
+		t.Fatalf("onPublish called %d times before any publish", calls)
+	}
+	if w = doJSON(t, h, "POST", "/api/catalog/drafts/"+d.ID+"/publish", map[string]any{}); w.Code != http.StatusOK {
+		t.Fatalf("publish: %d %s", w.Code, w.Body)
+	}
+	if calls != 1 {
+		t.Fatalf("onPublish called %d times, want 1", calls)
 	}
 }
 
@@ -1914,8 +2045,14 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Register adds the nine draft endpoints (architecture note, Plan 4b) to
 // the REST API, each gated by auth.Require("task-author", ...). Call it
-// before a.Handler(), same convention as merge.Register.
-func Register(a *api.API, st *store.Store) {
+// before a.Handler(), same convention as merge.Register. onPublish, which
+// may be nil, is called synchronously after a successful Publish (never on
+// a 409 or other error) — the catalog's analogue of merge.Register's
+// onMainMoved, added during cross-plan review so a draft publish
+// reconciles pinned workspaces immediately instead of waiting for an
+// unrelated future catalog push (architecture note ruling 17; see
+// "Decisions beyond the architecture note").
+func Register(a *api.API, st *store.Store, onPublish func()) {
 	a.Handle("GET /api/catalog/drafts", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleList(st, w, r) }))
 	a.Handle("POST /api/catalog/drafts", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleCreate(st, w, r) }))
 	a.Handle("GET /api/catalog/drafts/{id}", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleView(st, w, r) }))
@@ -1924,7 +2061,7 @@ func Register(a *api.API, st *store.Store) {
 	a.Handle("PUT /api/catalog/drafts/{id}/groups-index", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleGroupsIndexEdit(st, w, r) }))
 	a.Handle("PUT /api/catalog/drafts/{id}/processors", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleProcessorsEdit(st, w, r) }))
 	a.Handle("DELETE /api/catalog/drafts/{id}", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handleDelete(st, w, r) }))
-	a.Handle("POST /api/catalog/drafts/{id}/publish", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handlePublish(st, w, r) }))
+	a.Handle("POST /api/catalog/drafts/{id}/publish", auth.Require("task-author", func(w http.ResponseWriter, r *http.Request) { handlePublish(st, onPublish, w, r) }))
 }
 
 // --- JSON shapes ---
@@ -2199,7 +2336,7 @@ func handleProcessorsEdit(st *store.Store, w http.ResponseWriter, r *http.Reques
 
 // --- publish ---
 
-func handlePublish(st *store.Store, w http.ResponseWriter, r *http.Request) {
+func handlePublish(st *store.Store, onPublish func(), w http.ResponseWriter, r *http.Request) {
 	author, err := api.Author(r)
 	if err != nil {
 		api.WriteJSON(w, http.StatusUnauthorized, errorBody{err.Error()})
@@ -2227,6 +2364,9 @@ func handlePublish(st *store.Store, w http.ResponseWriter, r *http.Request) {
 		}
 		api.WriteJSON(w, http.StatusConflict, cb)
 		return
+	}
+	if onPublish != nil {
+		onPublish()
 	}
 	api.WriteJSON(w, http.StatusOK, publishResultJSON{Commit: result.Commit})
 }
@@ -2292,19 +2432,72 @@ func writeError(w http.ResponseWriter, err error) {
 Run: `go test ./internal/catalogdraft/ && go vet ./internal/catalogdraft/`
 Expected: PASS.
 
-- [ ] **Step 5: Wire it into the server** — modify `cmd/custos/serve.go` (or
-wherever `merge.Register` is already called) to also call
-`catalogdraft.Register(a, st)` before `a.Handler()` is built, in the same
-place and the same way `merge.Register(a, st, onMainMoved, onRerun)` is
-already wired. This is a one-line addition next to an existing call; locate
-it with `grep -n "merge.Register" cmd/custos/*.go` and add the line
-immediately after.
+- [ ] **Step 5: Wire it into the server, with `onPublish` reconciling
+workspaces the same way a catalog `git push` already does**
+
+This resolves the gap flagged in "Open questions for the cross-plan
+reviewer" below: `catalogdraft.Publish` moves the catalog's `main` directly
+through `store.UpdateCatalog`, the same way `merge.Fork`/`merge.Merge` move
+a workspace's `main` directly — and the architecture note now gives
+`catalogdraft.Register` an `onPublish func()` parameter for exactly this
+reason (ruling 17), mirroring `merge.Register`'s `onMainMoved`.
+
+`cmd/custos/distribute.go`'s `startDistribution` already builds exactly the
+closure this needs (`reconcile`, which calls `distribute.Reconcile(st)` and
+logs its error) and wires it to `srv.OnCatalogPush`; the only change needed
+is to return that closure so `openServer` can hand it to
+`catalogdraft.Register` too:
+
+```go
+func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr io.Writer) func() {
+	distribute.Register(a, st)
+	reconcile := func() {
+		if err := distribute.Reconcile(st); err != nil {
+			fmt.Fprintf(stderr, "custos serve: distributing the catalog: %v\n", err)
+		}
+	}
+	srv.OnCatalogPush(reconcile)
+	srv.OnWorkspacePush(func(id string) {
+		if err := distribute.ReconcileWorkspace(st, id); err != nil {
+			fmt.Fprintf(stderr, "custos serve: distributing workspace %s: %v\n", id, err)
+		}
+	})
+	reconcile()
+	return reconcile
+}
+```
+
+(The only change from what is already in the tree is the `func()` return
+type and the trailing `return reconcile`.)
+
+In `cmd/custos/serve.go`'s `openServer`, call `catalogdraft.Register` after
+`startDistribution` (not next to `merge.Register`, as an earlier draft of
+this plan said, since the closure `onPublish` needs does not exist yet at
+that point) and capture its return value:
+
+```go
+	srv := server.New(st)
+	reconcile := startDistribution(st, a, srv, stderr)
+	catalogdraft.Register(a, st, reconcile)
+	startRuns(ctx, st, a, srv, svc)
+	srv.WithAPI(a.Handler())
+```
+
+Locate the current call sites with `grep -n "startDistribution(" cmd/custos/*.go`;
+`cmd/custos/distribute_test.go`'s two call sites (which currently ignore
+`startDistribution`'s return) keep compiling unchanged — Go allows ignoring
+an extra return value by simply not assigning it, but since the function's
+signature changes from `func(...)` to `func(...) func()`, `go vet` would
+flag an assignment call that drops it; check `distribute_test.go`'s two
+calls (`startDistribution(st, a, srv, log)` and
+`startDistribution(st, api.New(st, bl), server.New(st), &log)`) and prefix
+each with `_ = ` if they do not already use the return value.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/catalogdraft/http.go internal/catalogdraft/http_test.go cmd/custos/serve.go
-git commit -m "Register the catalog draft REST endpoints
+git add internal/catalogdraft/http.go internal/catalogdraft/http_test.go cmd/custos/serve.go cmd/custos/distribute.go cmd/custos/distribute_test.go
+git commit -m "Register the catalog draft REST endpoints and reconcile workspaces on publish
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 ```
@@ -2315,9 +2508,84 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `internal/status/html.go`
-- Modify: `internal/api/read.go` (`getBook`)
+- Modify: `internal/status/status.go` (`TaskStatus.Choices`, cross-plan fix below)
+- Modify: `internal/api/read.go` (`getBook`; `taskStatusJSON.Choices`, cross-plan fix below)
 - Modify: `go.mod`, `go.sum` (new dependency)
 - Test: `internal/status/html_test.go`, extend `internal/api/read_test.go`
+
+**Cross-plan fix folded into this task** (see "Decisions beyond the
+architecture note", item 12): plan 4c flagged that no endpoint exposes a
+generated task's `choices`, so `AnswerView.vue` could not render a
+`choice`-type generated task's answer form. `status.TaskStatus` and
+`internal/api/read.go`'s `taskStatusJSON` are phase-2 types this task
+already has open for the HTML-export change below, so the one-line
+addition rides along here rather than opening either file again in a
+separate task:
+
+- [ ] **Step 0a: add `Choices` to `status.TaskStatus`** — in
+  `internal/status/status.go`, add a field next to `AnswerType`:
+
+```go
+type TaskStatus struct {
+	ID         string
+	Current    task.Ref // current version
+	Title      string
+	AnswerType task.AnswerType
+	Choices    []string // valid values when AnswerType == task.AnswerChoice
+	Generated  bool
+	State      State
+	Answer     *workspace.Answer
+	Merged     []*workspace.Answer
+	InEffect   []*workspace.Answer
+}
+```
+
+and set it next to the existing `Title: cur.Title, AnswerType: cur.AnswerType`
+assignment (`cur` is the task's current `task.Meta`, which already carries
+`Choices`):
+
+```go
+	ts := &TaskStatus{
+		ID: cur.ID, Current: cur.Ref(), Title: cur.Title, AnswerType: cur.AnswerType,
+		Choices: cur.Choices,
+		// ...unchanged fields below...
+	}
+```
+
+- [ ] **Step 0b: add `Choices` to `taskStatusJSON`** — in
+  `internal/api/read.go`:
+
+```go
+type taskStatusJSON struct {
+	ID         string          `json:"id"`
+	Version    string          `json:"version"`
+	Title      string          `json:"title"`
+	AnswerType task.AnswerType `json:"answer_type"`
+	Choices    []string        `json:"choices,omitempty"`
+	Generated  bool            `json:"generated"`
+	State      status.State    `json:"state"`
+	Answer     *answerJSON     `json:"answer"`
+	Merged     []answerJSON    `json:"merged"`
+	InEffect   []answerJSON    `json:"in_effect"`
+}
+```
+
+and populate it in `statusToJSON`:
+
+```go
+		tj := taskStatusJSON{
+			ID: ts.ID, Version: ts.Current.Version, Title: ts.Title, AnswerType: ts.AnswerType,
+			Choices:   ts.Choices,
+			Generated: ts.Generated, State: ts.State,
+			Merged: a.answersToJSON(ts.Merged), InEffect: a.answersToJSON(ts.InEffect),
+		}
+```
+
+- [ ] **Step 0c: test** — extend `internal/api/read_test.go`'s existing
+  status test (or add `TestGetStatusChoices`) to bind a `choice`-type task
+  (catalog or, with a processor test fixture, generated) and assert the
+  JSON response's matching task entry has `"choices":["a","b"]` (whatever
+  the fixture's choices are). Run: `go test ./internal/status/ ./internal/api/`.
 
 **Interfaces:**
 - Consumes: `status.{Status, Entry, TaskStatus, State}`, `workspace.Answer`,
@@ -2332,13 +2600,15 @@ func RenderHTML(s *Status) []byte
 Add the dependency with:
 
 ```bash
-go get github.com/yuin/goldmark@v1.7.8
+go get github.com/yuin/goldmark@latest
 ```
 
-(Pin whatever `go get` actually resolves at implementation time if `v1.7.8`
-is no longer the latest tag then — see "Decisions beyond the architecture
-note" for why this exact patch version is a best-effort pin rather than a
-verified one.)
+Confirmed during cross-plan review by actually running this against the
+real module proxy: it resolves to **v1.8.6** as of this review (not the
+v1.7.8 this plan originally guessed at — see "Decisions beyond the
+architecture note" for why that guess was never a verified pin). Pin
+`@latest`, not a specific version, so a later implementer gets whatever
+is actually current rather than reproducing an unverified guess.
 
 `RenderHTML` mirrors `RenderMarkdown`'s structure (the same `Status.Book`
 walk, the same state notices) but emits a complete, self-contained HTML
@@ -2626,7 +2896,7 @@ Expected: PASS.
 
 ```bash
 go mod tidy
-git add internal/status/html.go internal/status/html_test.go internal/api/read.go internal/api/read_test.go go.mod go.sum
+git add internal/status/html.go internal/status/html_test.go internal/status/status.go internal/api/read.go internal/api/read_test.go go.mod go.sum
 git commit -m "Add status.RenderHTML and the book handler's ?format=html
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
@@ -2746,15 +3016,14 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
    follows an existing precedent closely enough that I judged it very low
    risk for 4c/4d to collide with.
 
-9. **`goldmark`'s exact pinned version (`v1.7.8`) is a best-effort pin, not
-   a verified one.** I do not have network access from this planning session
-   to confirm the latest released tag of `github.com/yuin/goldmark` or that
-   `v1.7.8` exists; the module path (`github.com/yuin/goldmark`, with
-   `goldmark/extension` and `goldmark/renderer/html` as subpackages) is
-   correct and stable regardless of exact version. The implementer should
-   run `go get github.com/yuin/goldmark@latest` (or pin the specific version
-   the team wants) at implementation time and record whatever version
-   actually lands in `go.mod` — Task 8's own text already says this.
+9. **`goldmark`'s version, resolved during cross-plan review.** The
+   module path (`github.com/yuin/goldmark`, with `goldmark/extension` and
+   `goldmark/renderer/html` as subpackages) was already correct; the
+   specific tag this plan originally guessed (`v1.7.8`) was never
+   verified and is replaced with `@latest` (Task 8), confirmed against
+   the real module proxy while applying this plan to a scratch copy to
+   resolve to **v1.8.6**. Record whatever version actually lands in
+   `go.mod` at implementation time.
 
 10. **`status.RenderHTML` enables `goldmark/renderer/html.WithUnsafe()`**,
     letting an `AnswerMarkdown`-typed answer body embed raw HTML that passes
@@ -2769,38 +3038,35 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
     dropping `WithUnsafe()`, is a one-line change if the team decides
     otherwise).
 
-11. **This plan does not wire catalog-draft publishes into
-    `distribute.Reconcile`.** See "Open question for the cross-plan
-    reviewer" below — this is a real functional gap I chose not to paper
-    over by inventing a signature the architecture note does not fix.
+11. **Resolved by cross-plan review: `catalogdraft.Register` now takes an
+    `onPublish func()` callback** (option (a) of the three listed under
+    "Open questions for the cross-plan reviewer" below), mirroring
+    `merge.Register`'s `onMainMoved`. The architecture note has been
+    updated (ruling 17) to fix this signature; Task 7 above wires it to the
+    same `distribute.Reconcile` closure `cmd/custos/distribute.go` already
+    builds for `OnCatalogPush`, so a draft publish reconciles pinned
+    workspaces immediately, the same as a catalog `git push` does.
+12. **`taskStatusJSON` (`internal/api/read.go`) gains a `Choices []string`
+    field**, carried from `status.TaskStatus` (itself extended with a
+    `Choices []string` field, set from the task's current `task.Meta` the
+    same place `Title`/`AnswerType` are already set in
+    `internal/status/status.go`). This is a one-line additive fix to
+    phase-2 code neither this plan nor plan 4c owns outright, made here
+    because this plan's Task 8 already touches `internal/api/read.go` for
+    `?format=html` — see Task 8's added step below. It closes a real gap
+    plan 4c flagged ("no endpoint exposes a generated task's... choices"):
+    a generated `choice`-type task can now be answered through the UI,
+    since the status endpoint — which already covers every task, generated
+    or not — now carries its choices.
 
 ## Open questions for the cross-plan reviewer
 
-- **Publishing a catalog draft does not trigger workspace reconciliation.**
-  `cmd/custos/distribute.go` wires `srv.OnCatalogPush(reconcile)`, which only
-  fires for an HTTP push to `catalog.git` (`internal/server.Server`'s own
-  push-path matching). `catalogdraft.Publish` moves the catalog's `main`
-  through `store.UpdateCatalog` directly, the same way `merge.Fork`/`merge.Merge`
-  move a workspace's `main` directly — and *those* callers are given an
-  explicit `onMainMoved func(id string)` callback by `merge.Register` for
-  exactly this reason (ruling 2.20: such a move "does not go through a Git
-  push"). The architecture note fixes `catalogdraft.Register`'s signature as
-  `func Register(a *api.API, st *store.Store)` with no equivalent callback
-  parameter, so this plan does not add one (adding one would be inventing a
-  signature the note does not name). The practical effect: after a catalog
-  draft is published through the API, workspaces will not see the new pin
-  proposal / reconciliation until the *next* catalog `git push` happens to
-  occur for some other reason. Options for the reviewer to pick from when
-  reconciling all four plans: (a) extend `catalogdraft.Register`'s signature
-  with an `onPublish func()` callback, mirroring `merge.Register`'s
-  `onMainMoved`, wired from `cmd/custos` the same way; (b) give `store` a
-  generic `OnCatalogMainMoved(f func())` hook analogous to the existing
-  `OnMainMoved` (which is workspace-scoped) and have `cmd/custos/distribute.go`
-  register against it; (c) accept the gap for this phase and note it as a
-  known limitation. I did not pick one, since the architecture note's fixed
-  `Register` signature does not currently admit (a) without a note change.
-- **`goldmark`'s pinned version** (Decision 9 above) needs confirming
-  against whatever is actually resolvable at implementation time.
+Both of this plan's open questions were resolved during cross-plan review;
+kept here for the record.
+
+- ~~Publishing a catalog draft does not trigger workspace reconciliation.~~
+  **Resolved:** see Decision 11 above and Task 7's Step 5.
+- ~~`goldmark`'s pinned version~~ **Resolved:** see Decision 9 above — confirmed to resolve to v1.8.6 against the real module proxy while applying this plan to a scratch copy.
 
 ## Rulings for spec §11.4
 
@@ -2817,7 +3083,23 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
    commit authored by the publishing user with the draft's tree content,
    rather than moving `main` to literally point at the draft branch's own
    tip commit.
-4. Publishing a catalog draft through the API does not currently trigger
-   `distribute.Reconcile` for affected workspaces; this is an accepted gap
-   of this phase pending a decision in cross-plan review (see "Open
-   questions for the cross-plan reviewer").
+4. Publishing a catalog draft through the API calls `onPublish`
+   (`catalogdraft.Register`'s new parameter, architecture note ruling 17),
+   which `cmd/custos` wires to the same `distribute.Reconcile` call
+   `OnCatalogPush` already drives, so affected workspaces are reconciled
+   immediately — resolved during cross-plan review; no longer a gap.
+5. `GET /api/workspaces/{id}/status`'s `taskStatusJSON` carries a
+   `Choices []string` field for every task (generated or catalog), closing
+   the gap that left a generated `choice`-type task impossible to answer
+   through the web UI.
+6. `store.UpdateCatalog` takes an optional `allowImmutableChange ...string`
+   naming paths whose immutability ("was changed") problem does not block
+   that one call; only `catalogdraft.Publish`'s resolved-merge-conflict
+   case ever passes it (the paths in the caller's own `res`), never a git
+   push. Found necessary empirically while applying this plan to a scratch
+   copy (Part 2 of cross-plan review): without it, `TestPublishConflict`'s
+   own "resolved with theirs" step cannot succeed, because the second
+   draft's resolved content is, by construction, different from whatever
+   content the first draft's publish already committed to that exact
+   path, which `catalog.CheckImmutable` would otherwise — correctly, for
+   every other case — reject.

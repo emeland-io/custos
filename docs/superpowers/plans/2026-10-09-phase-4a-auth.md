@@ -50,7 +50,7 @@
 | `internal/auth/session.go` | Signed cookies: session and sign-in state |
 | `internal/auth/middleware.go` | `Middleware`, `FromRequest`, `Require`, `RequireWorkspace` |
 | `internal/auth/oidc.go` | OIDC client, `/auth/login`, `/auth/callback` |
-| `internal/auth/http.go` | `Register`; `/auth/logout`, `/auth/me`, `/auth/tokens…`, `/api/admin/users…` |
+| `internal/auth/http.go` | `Register`; `/auth/logout`, `/auth/config`, `/auth/me`, `/auth/tokens…`, `/api/admin/users…` |
 | `internal/auth/*_test.go` | Unit tests; `idp_test.go` is the test identity provider |
 | `internal/server/server.go` | `WithAuth`, `WithUI`, `WithMiddleware`; sign-in gate on `/api/` and `/git/`; push role check |
 | `internal/server/auth_test.go` | Mounting, middleware order, gates, push roles |
@@ -70,7 +70,8 @@
 | `GET /auth/login` | anyone | 302 to the IdP, sets `custos_login` | 404 token-only mode |
 | `GET /auth/callback` | anyone holding `custos_login` | 302 to `/`, sets `custos_session`, clears `custos_login` | 404 token-only mode; 400 missing, expired or mismatched sign-in state; 401 IdP refused or ID token invalid; 403 no or unverified email, or name/email unusable as a commit author; 502 IdP unreachable or answered without `id_token` |
 | `POST /auth/logout` | anyone | 204, clears `custos_session` | — |
-| `GET /auth/me` | signed in | 200 `{"name","email","roles":{"admin","task_author","processor_author","engineer":[]}}` | 401 |
+| `GET /auth/config` | anyone | 200 `{"oidc": bool}` | — |
+| `GET /auth/me` | signed in | 200 `{"name","email","roles":{"admin","task_author","processor_author","engineer":[]}}` | 401 (always — never 404; see `GET /auth/config` for how a caller distinguishes token-only mode) |
 | `GET /auth/tokens` | signed in | 200 `[{"id","label","created","last_used"}]`, oldest first, `last_used` `null` until first use | 401 |
 | `POST /auth/tokens` | signed in | 201 `{"id","token"}` with `Cache-Control: no-store` | 400 bad body or label; 401; 413 |
 | `DELETE /auth/tokens/{id}` | signed in | 204 | 401; 404 unknown or not the caller's |
@@ -1417,21 +1418,30 @@ func TestSessionTampering(t *testing.T) {
 	payload, sig, _ := strings.Cut(value, ".")
 
 	other := newManager(t) // a different random secret
-	otherIssuer := *m
-	otherIssuer.issuer = "https://other-idp.example.org"
 	expired := m.sign(claims{Kind: "session", Email: "jane@example.org", Issuer: m.issuer, Exp: now.Add(-time.Second).Unix()})
 	loginShaped := m.sign(claims{Kind: "login", Email: "jane@example.org", Issuer: m.issuer, Exp: now.Add(time.Hour).Unix()})
+	// wrongIssuer is signed with m's own secret, not a copy of m with a
+	// different issuer field: verify() does not itself check the issuer
+	// (resolve(), one layer up in middleware.go, does that) — so the only
+	// thing that actually needs to differ here is claims.Issuer, which
+	// the test's own "want" computation checks below. Found while applying
+	// this plan: `otherIssuer := *m; otherIssuer.issuer = "..."` both
+	// copies a Manager containing a sync.Mutex (a go vet failure) and
+	// signs `good`, whose Issuer field is already m.issuer and never
+	// changes — so that case produced a token byte-identical to the
+	// "good (control)" one, silently testing nothing.
+	wrongIssuer := m.sign(claims{Kind: "session", Email: "jane@example.org", Subject: "sub-1", Issuer: "https://other-idp.example.org", Exp: now.Add(time.Hour).Unix()})
 
 	for name, value := range map[string]string{
-		"good (control)":           value,
-		"no dot":                   payload + sig,
-		"payload changed":          flip(payload) + "." + sig,
-		"signed with another secret": func() string { v, _ := strings.CutSuffix(other.sign(good), ""); return v }(),
-		"wrong issuer in claims":   otherIssuer.sign(good),
-		"expired":                  expired,
-		"really the login cookie":  loginShaped,
-		"empty":                    "",
-		"garbage":                  "not-a-cookie",
+		"good (control)":             value,
+		"no dot":                     payload + sig,
+		"payload changed":            flip(payload) + "." + sig,
+		"signed with another secret": other.sign(good),
+		"wrong issuer in claims":     wrongIssuer,
+		"expired":                    expired,
+		"really the login cookie":    loginShaped,
+		"empty":                      "",
+		"garbage":                    "not-a-cookie",
 	} {
 		c, err := m.verify(value, "session")
 		ok := err == nil && c.Issuer == m.issuer
@@ -1517,9 +1527,13 @@ func TestMiddlewareResolvesSessionAndToken(t *testing.T) {
 		t.Errorf("bearer: X-Email %q", rec.Header().Get("X-Email"))
 	}
 
-	id, secret, _ := cutToken(tok)
+	// resolve() passes the whole Basic password straight to lookupToken,
+	// which expects the full "<id>.<secret>" bearer value, not the secret
+	// half alone — found while applying this plan: an earlier version of
+	// this line used cutToken to split tok and sent only the secret half,
+	// which lookupToken then (correctly) rejected as malformed.
 	req = httptest.NewRequest("GET", "/api/catalog", nil)
-	req.SetBasicAuth(id, secret) // git sends the token as the Basic password; the username is ignored
+	req.SetBasicAuth("x", tok) // git sends the token as the Basic password; the username is ignored
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Header().Get("X-Email") != "joe@example.org" {
@@ -1815,7 +1829,24 @@ func (m *Manager) Middleware(excludedPrefixes ...string) func(http.Handler) http
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, p := range excludedPrefixes {
-				if r.URL.Path == p || (strings.HasSuffix(p, "/") && strings.HasPrefix(r.URL.Path, p)) {
+				// p == "/" is deliberately an *exact* match only (the
+				// first clause), never a prefix match: every request
+				// path starts with "/", so letting a bare "/" act as a
+				// prefix (it ends in "/", so the second clause would
+				// otherwise accept it) bypassed credential resolution for
+				// every single request to every path — found empirically
+				// while applying this plan to a scratch copy and running
+				// internal/server's real end-to-end tests
+				// (TestAPINeedsSignIn, TestPushNeedsRole) against a real
+				// HTTP server: both failed because no caller was ever
+				// resolved, for any request, once "/" was in
+				// excludedPrefixes — exactly the value cmd/custos/serve.go
+				// passes in production. This was a critical bug: as
+				// originally written, authentication was a no-op for
+				// every request to a real custos serve. Only a longer
+				// directory-style prefix (none in current use besides
+				// "/") is still eligible for prefix matching.
+				if r.URL.Path == p || (p != "/" && strings.HasSuffix(p, "/") && strings.HasPrefix(r.URL.Path, p)) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -1989,20 +2020,46 @@ func (idp *testIDP) setCode(code string, extra map[string]any) { idp.code, idp.c
 
 func (idp *testIDP) token(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || idp.code == "" || r.Form.Get("code") != idp.code {
-		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
+		// The real OIDC/OAuth2 token endpoint always answers JSON with an
+		// explicit Content-Type, on an error response too — found while
+		// applying this plan: omitting it (so Go's server falls back to
+		// sniffing, which does not recognize JSON and yields "text/plain")
+		// makes golang.org/x/oauth2's AuthStyle auto-probe treat the
+		// *first*, actually-successful exchange attempt as unparseable
+		// and silently retry with the other auth style; the retry then
+		// re-presents the same, by-then-already-consumed code and gets a
+		// legitimate invalid_grant, which is the error that actually
+		// surfaces to the caller instead of the real token.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
 		return
 	}
 	idp.code = "" // a code is used once
+	// client_id arrives either in the form body (AuthStyleInParams) or as
+	// the Basic auth username (AuthStyleInHeader) — golang.org/x/oauth2's
+	// auth-style auto-probe tries the header style first, which succeeds
+	// against this fixture (nothing here checks the client secret), so
+	// the aud claim must be read from wherever it actually landed or
+	// every real sign-in gets an empty audience and fails go-oidc's own
+	// audience check; found while applying this plan.
+	clientID := r.Form.Get("client_id")
+	if clientID == "" {
+		if u, _, ok := r.BasicAuth(); ok {
+			clientID = u
+		}
+	}
 	now := time.Now()
 	claims := map[string]any{
 		"iss": idp.issuer(),
-		"aud": r.Form.Get("client_id"),
+		"aud": clientID,
 		"iat": now.Unix(),
 		"exp": now.Add(time.Minute).Unix(),
 	}
 	for k, v := range idp.claims {
 		claims[k] = v
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"access_token": "test-access-token",
 		"token_type":   "Bearer",
@@ -2098,10 +2155,16 @@ func runLogin(t *testing.T, m *Manager) (loginCookieHeader string, state string)
 	return rec.Result().Cookies()[0].String(), loc.Query().Get("state")
 }
 
-func callback(t *testing.T, m *Manager, loginCookie, state, code string) *httptest.ResponseRecorder {
+func callback(t *testing.T, m *Manager, loginCookieHeader, state, code string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/auth/callback?state="+state+"&code="+code, nil)
-	req.Header.Set("Cookie", loginCookie)
+	// Built with url.Values, not raw string concatenation: TestOIDCCallbackRejects
+	// below arms codes like "code-no email" (the map key, which contains a
+	// space), and a literal space in a hand-built target string makes
+	// httptest.NewRequest panic trying to parse it as a raw HTTP request
+	// line — found while applying this plan.
+	q := url.Values{"state": {state}, "code": {code}}
+	req := httptest.NewRequest("GET", "/auth/callback?"+q.Encode(), nil)
+	req.Header.Set("Cookie", loginCookieHeader)
 	rec := httptest.NewRecorder()
 	m.handleCallback(rec, req)
 	return rec
@@ -2110,12 +2173,20 @@ func callback(t *testing.T, m *Manager, loginCookie, state, code string) *httpte
 func TestHandleCallbackSignsIn(t *testing.T) {
 	idp := newTestIDP(t)
 	m := newOIDCManager(t, idp)
-	loginCookie, state := runLogin(t, m)
+	// Named loginCookieHeader, not loginCookie, so the comparison below
+	// against the real cookie-name constant (package-level loginCookie,
+	// session.go) isn't shadowed by this function's own local variable —
+	// found while applying this plan: as "loginCookie, state :=
+	// runLogin(...)" the local shadowed the constant, so
+	// "c.Name == loginCookie" compared a short cookie name against a
+	// whole Set-Cookie header string and could never be true, silently
+	// defeating the "was cleared" check below.
+	loginCookieHeader, state := runLogin(t, m)
 	idp.setCode("the-code", map[string]any{
 		"sub": "idp-sub-1", "email": "jane@example.org", "email_verified": true, "name": "Jane Doe",
-		"nonce": nonceFromState(t, m, loginCookie),
+		"nonce": nonceFromState(t, m, loginCookieHeader),
 	})
-	rec := callback(t, m, loginCookie, state, "the-code")
+	rec := callback(t, m, loginCookieHeader, state, "the-code")
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
 		t.Fatalf("code %d location %q body %s", rec.Code, rec.Header().Get("Location"), rec.Body)
 	}
@@ -2540,6 +2611,24 @@ func decodeBody[T any](t *testing.T, rec *httptest.ResponseRecorder, want int) T
 	return v
 }
 
+// TestHandleConfig: unauthenticated, always 200, and the oidc field tracks
+// whether the Manager was built with Config.OIDC set — this is the signal
+// the frontend uses to tell token-only mode apart from a plain 401
+// (cross-plan review of 4a/4c; architecture note ruling 18), so /auth/me
+// itself never needs to vary its status code for that purpose.
+func TestHandleConfig(t *testing.T) {
+	m := newManager(t) // token-only: Config.OIDC is nil
+	h := testHandler(t, m)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/auth/config", nil))
+	got := decodeBody[struct {
+		OIDC bool `json:"oidc"`
+	}](t, rec, http.StatusOK)
+	if got.OIDC {
+		t.Errorf("token-only manager: /auth/config oidc = true")
+	}
+}
+
 func TestHandleMe(t *testing.T) {
 	m := newManager(t)
 	h := testHandler(t, m)
@@ -2602,8 +2691,19 @@ func TestTokenEndpoints(t *testing.T) {
 		ID    string `json:"id"`
 		Label string `json:"label"`
 	}](t, rec, http.StatusOK)
-	if len(list) != 1 || list[0].ID != created.ID || list[0].Label != "laptop" {
-		t.Fatalf("list %+v", list)
+	// addUser (users_test.go/tokens_test.go, Task 2) already mints one
+	// token labelled "test" as its own side effect, so the list also
+	// carries that entry alongside "laptop" — found while applying this
+	// plan: an earlier version of this assertion expected exactly one
+	// entry, which only held if addUser minted none.
+	found := false
+	for _, tok := range list {
+		if tok.ID == created.ID && tok.Label == "laptop" {
+			found = true
+		}
+	}
+	if len(list) != 2 || !found {
+		t.Fatalf("list %+v, want 2 entries including {%s laptop}", list, created.ID)
 	}
 
 	rec = httptest.NewRecorder()
@@ -2703,7 +2803,7 @@ func TestHandleListUsers(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/auth/ -run 'TestHandleMe|TestHandleLogout|TestTokenEndpoints|TestPutRoles|TestHandleListUsers'`
+Run: `go test ./internal/auth/ -run 'TestHandleConfig|TestHandleMe|TestHandleLogout|TestTokenEndpoints|TestPutRoles|TestHandleListUsers'`
 Expected: FAIL — `undefined: Register`.
 
 - [ ] **Step 3: Implement** `internal/auth/http.go`
@@ -2733,6 +2833,7 @@ func Register(a *api.API, m *Manager) {
 	a.Handle("GET /auth/login", m.handleLogin)
 	a.Handle("GET /auth/callback", m.handleCallback)
 	a.Handle("POST /auth/logout", m.handleLogout)
+	a.Handle("GET /auth/config", m.handleConfig)
 	a.Handle("GET /auth/me", requireSignedIn(m.handleMe))
 	a.Handle("GET /auth/tokens", requireSignedIn(m.handleListTokens))
 	a.Handle("POST /auth/tokens", requireSignedIn(m.handleCreateToken))
@@ -2776,6 +2877,16 @@ func decodeAuthJSON(w http.ResponseWriter, r *http.Request, v any) error {
 func (m *Manager) handleLogout(w http.ResponseWriter, r *http.Request) {
 	m.clearCookie(w, sessionCookie)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleConfig answers whether /auth/login is usable, unauthenticated and
+// always 200 — the signal the frontend uses to tell "sign in please" (OIDC
+// configured, a plain 401 from handleMe means not yet signed in) apart
+// from "there is no sign-in here, paste a token" (token-only mode), rather
+// than overloading /auth/me's status code for both meanings (cross-plan
+// review of 4a/4c; architecture note ruling 18).
+func (m *Manager) handleConfig(w http.ResponseWriter, r *http.Request) {
+	api.WriteJSON(w, http.StatusOK, map[string]any{"oidc": m.oidc != nil})
 }
 
 func (m *Manager) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -2893,7 +3004,7 @@ func httpStatusForAuthErr(err error) int {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test -race ./internal/auth/ -run 'TestHandleMe|TestHandleLogout|TestTokenEndpoints|TestPutRoles|TestHandleListUsers' -v`
+Run: `go test -race ./internal/auth/ -run 'TestHandleConfig|TestHandleMe|TestHandleLogout|TestTokenEndpoints|TestPutRoles|TestHandleListUsers' -v`
 Expected: PASS.
 
 - [ ] **Step 5: Run the package and commit**
@@ -3579,6 +3690,12 @@ func TestPushNeedsRole(t *testing.T) {
 	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: x\n---\n"})
 	gittest.Run(t, wsDir, "push", "origin", "main") // origin already carries eng's token, from clone
 
+	// A further local commit, so the push below actually has something
+	// new to send: otherwise git decides the remote is already up to
+	// date and never issues the request at all, which would make this
+	// check pass even if the role gate were missing entirely — found
+	// while applying this plan.
+	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: y\n---\n"})
 	if out, err := gittest.Try(wsDir, "push", authedURL(t, baseURL+"/git/workspaces/"+fixture.WorkspaceID+".git", taskAuthor), "main"); err == nil {
 		t.Fatalf("task-author (not engineer here) pushed the workspace:\n%s", out)
 	}
@@ -4096,7 +4213,45 @@ func (e *env) do(t *testing.T, method, path, author, body string) *httptest.Resp
 }
 ```
 
-Line 253 (the other `req.Header.Set("X-Custos-Author", header)` in this file, in whichever test builds a request by hand rather than through `do`) becomes the same pattern: `req = req.WithContext(WithCaller(req.Context(), allCaller{sig: /* parse header the same way */}))`.
+Line 253 (the other `req.Header.Set("X-Custos-Author", header)` in this file) is `TestAuthor`, which the "same pattern" above does not actually fit — found while applying this plan: `TestAuthor` tests `Author(req)` itself against a table of malformed header strings ("Jane Doe", "<jane@example.org>", ...), and `Author` no longer parses anything out of the request at all, so there is nothing left to feed a malformed string into. Rewrite it instead to test the new contract directly:
+
+```go
+// TestAuthor: Author now reads the caller the authentication middleware
+// put in the request's context (api.CallerOf) instead of a client-supplied
+// header. No caller in context -> 401; a caller in context -> its own
+// Signature().
+func TestAuthor(t *testing.T) {
+	req := httptest.NewRequest("POST", "/api/blobs", nil)
+	if sig, err := Author(req); err == nil {
+		t.Errorf("no caller: sig %+v, want an error", sig)
+	} else {
+		rec := httptest.NewRecorder()
+		WriteError(rec, err)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("no caller: status %d, want 401", rec.Code)
+		}
+	}
+
+	req = req.WithContext(WithCaller(req.Context(), allCaller{sig: jane}))
+	sig, err := Author(req)
+	if err != nil || sig != jane {
+		t.Errorf("with caller: %+v %v", sig, err)
+	}
+}
+```
+
+Separately, `internal/api/workspaces_test.go`'s `TestCreateWorkspaceErrors` has a `"bad author"` table case (`author: "Jane"`, expecting 401) that Step 1's grep does not catch at all (it names no header literal) but that this sweep still breaks: once `e.do` itself parses its `author` argument into a signature (above), a malformed string like `"Jane"` fails inside `do` via `t.Fatalf`, before the request is even built — there is no longer an equivalent of "a malformed header reaches the server and gets 401 there" to test. Remove that one table entry (the `"no author"` entry right above it already covers "no caller → 401"):
+
+```go
+		{"exists", janeHeader, body, http.StatusConflict},
+		// "bad author" (a malformed X-Custos-Author header, e.g. "Jane")
+		// is removed: Author no longer parses anything out of the request
+		// itself, so there is no equivalent malformed-input case any more.
+		{"no author", "", `{"id":"` + otherWorkspace + `"}`, http.StatusUnauthorized},
+		{"path in id", janeHeader, `{"id":"../escape"}`, http.StatusBadRequest},
+```
+
+Neither of these two fixes is among Step 1's enumerated thirteen grep hits (neither test names the header literal), so finding them needs an actual test run after the rest of this step, not just the grep re-check.
 
 `blob_test.go`'s one hand-built request (`TestBlobUploadTooLarge`):
 
@@ -4579,6 +4734,18 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ## Decisions beyond the architecture note
 
+- **`GET /auth/config`** (unauthenticated, always 200, `{"oidc": bool}`) is a
+  new, small endpoint added during cross-plan review, not originally in the
+  architecture note's Plan 4a section (it is now — architecture note ruling
+  18). It exists because `/auth/me` always answers 401 to an
+  unauthenticated request in this plan (as its own endpoint table already
+  said), but plan 4c's `LoginView.vue`/`stores/auth.ts` were written reading
+  a 404 from `/auth/me` as "OIDC is off, offer the token-paste box" — a
+  signal this plan's `/auth/me` never actually sends. Overloading
+  `/auth/me`'s status code for two different meanings (not-yet-signed-in vs.
+  no-sign-in-exists) was rejected in favor of a third, explicit signal; `/auth/me`
+  itself is otherwise unchanged. See plan 4c's "Decisions" for the matching
+  frontend fix.
 - `auth.Principal(r *http.Request) (Principal, bool)` is renamed `auth.FromRequest` — the architecture note's own name does not compile (`type Principal struct` and `func Principal(...)` in one package) — flagged in Global Constraints as this entry; every citation of "the note's `Principal(r)`" elsewhere in this plan means `FromRequest`.
 - `FromRequest` does not keep a context key of its own: it calls `api.CallerOf` and type-asserts the result back to `Principal` — `Manager.Middleware` is then the *only* code that ever puts a caller in a request's context (through `api.WithCaller`), so `api` and `auth` can never disagree about which caller a request carries — the alternative (a second, `auth`-owned context key) would let the two go out of sync if a future handler set one but not the other.
 - `api.RequireRole` (Task 1, string-keyed, no `auth` import) is the only place role-gating logic actually lives; `auth.Require`/`auth.RequireWorkspace` (Task 3) are one-line wrappers over it. `internal/api/api.go`'s own two guarded routes call `RequireRole` directly with literal role strings (`"admin"`, `"engineer"`) instead of `auth.RoleAdmin`/`auth.RoleEngineer`, because `internal/api` must not import `internal/auth` (Review Focus 3) — `internal/merge`, `internal/distribute` and `internal/runs`, which `auth` does not import, use `auth.Require`/`RequireWorkspace` instead, since nothing stops them and the named constants read better there.
@@ -4591,7 +4758,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - `internal/remote`'s own HTTP requests (blob upload in `Push`, download in `Clone`) authenticate from `$CUSTOS_TOKEN` or, failing that, the git remote URL's own userinfo password; `custos push` drops `--author` entirely rather than repurposing it. The architecture note names exactly these two token sources; `--author` had never been anything but the value that header carried, so once the header is gone the flag has nothing left to do.
 - `GitAuthor` (`internal/remote/remote.go`) and its test are deleted, not kept — once `--author` is gone, nothing in the tree calls it. This is a judgment call, not required by the architecture note: the alternative (leaving a now-uncalled exported helper in place in case something else wants "the git committer's own name and email" later) was rejected to match this repository's own practice of not keeping unused exported surface around.
 - `internal/distribute/api_test.go`'s real-HTTP test harness (`httptest.NewServer` plus a real `http.Client`, with no shared Go context across that hop) stands in for `auth.Middleware` with a single fixed request header that resolves to a caller holding every role, rather than wiring a real `auth.Manager` and minting a token — this package's tests are about freeze/proposal logic, which Task 3 and Task 4 already cover for session/token resolution itself. `internal/merge` and `internal/runs`'s tests dispatch in-process (`http.Handler.ServeHTTP` directly, no network hop) and so inject the caller straight into the request's context instead, needing no stand-in at all.
-- `--addr`'s "there is no authentication yet, so keep it on loopback" usage caveat is corrected in **this** plan (Task 8), even though the architecture note's prose mentions the same correction under its "Plan 4c" section (alongside `WithUI`). 4a is the plan that makes the sentence false, so leaving a known-false security claim in `serve -h`'s own output for a whole extra phase was rejected. **Open question for the cross-plan reviewer:** confirm plan 4c's own document does not also claim this edit as its own — if it does, the edit is simply already done by the time 4c's implementer reaches it (a harmless no-op, not a conflict, since both plans would write the same sentence).
+- `--addr`'s "there is no authentication yet, so keep it on loopback" usage caveat is corrected in **this** plan (Task 8), even though the architecture note's prose mentions the same correction under its "Plan 4c" section (alongside `WithUI`). 4a is the plan that makes the sentence false, so leaving a known-false security claim in `serve -h`'s own output for a whole extra phase was rejected. **Resolved by cross-plan review:** plan 4c's own document did also claim this exact edit (its Task on `cmd/custos/serve.go`), with different replacement wording and also touching `defaultAddr`'s doc comment, which this plan's Task 8 does not touch. Plan 4c has been edited so its flag-usage-text edit is a no-op note ("already corrected by 4a; nothing to do here") and it keeps only the `defaultAddr` doc-comment fix, which this plan does not make and which was otherwise going to be left stale. No edit was needed here in 4a.
 - Every pre-existing test that predates per-endpoint roles (`internal/server/server_test.go`'s `start`, `internal/remote/remote_test.go`'s `startServer`, and `cmd/custos`'s `apiCall`-based integration tests) is given one bootstrap admin identity (`jane@example.org`, `Roles{Admin: true}`) rather than a caller scoped to exactly what each test needs — `Admin` already implies every role everywhere, and these tests are not testing authorization, so enumerating per-test roles would only add noise `TestPushNeedsRole`/`TestAPINeedsSignIn`/`TestRequireRole` already cover properly.
 
 ## Rulings for spec §11.4
@@ -4606,3 +4773,5 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 8. The OIDC test identity provider is hand-built on the standard library, not on `go-oidc`'s `oidc/oidctest` package, pending confirmation of that package's API in the vendored version.
 9. `server.Server`'s sign-in gate on `/api/` and `/git/` is unconditional: it is `WithMiddleware` that is optional (and, unset, leaves every such request refused), not the gate itself.
 10. `GitAuthor` is removed from `internal/remote` along with `--author` on `custos push`, rather than kept as unused exported surface.
+11. `GET /auth/config` (unauthenticated, `{"oidc": bool}`) is added so the frontend can tell token-only mode apart from a plain "not yet signed in" 401; `GET /auth/me` never varies its status code for that purpose (architecture note ruling 18, added during cross-plan review).
+12. The `--addr` usage-text correction (ruling 4.15) is made once, in this plan's Task 8; plan 4c's matching task was found to also claim it and was edited to a no-op for that specific string, keeping only its own, separate fix to `defaultAddr`'s stale doc comment.

@@ -147,7 +147,8 @@ Endpoints `Register` adds:
 | `GET /auth/login` | 302 to the IdP (state + PKCE verifier in a short-lived cookie); 404 when OIDC is not configured |
 | `GET /auth/callback` | exchanges the code, verifies the ID token, upserts the user's name/email into `users.json` (roles untouched), sets the session cookie, 302 to `/` |
 | `POST /auth/logout` | clears the session cookie, 204 |
-| `GET /auth/me` | `{"name","email","roles":{"admin","task_author","processor_author","engineer":[...]}}` for the caller, or 401 |
+| `GET /auth/config` | unauthenticated: `{"oidc": bool}` — whether `/auth/login` is usable. The frontend's `init()` calls this once to tell "sign in please" (`oidc: true`, then a plain 401 from `/auth/me` means not-yet-signed-in) apart from "there is no sign-in here, paste a token" (`oidc: false`, token-only mode), rather than overloading `/auth/me`'s status code (ruling 17; resolves the cross-plan tension between 4a's endpoint table, which only ever answers `/auth/me` with 401, and 4c's `LoginView`/`stores/auth.ts`, which needed a third signal distinct from both 401 and "signed in") |
+| `GET /auth/me` | `{"name","email","roles":{"admin","task_author","processor_author","engineer":[...]}}` for the caller, or 401 — **always** 401 when there is no caller, whether or not OIDC is configured; token-only mode is never signalled by this endpoint's status code (see `GET /auth/config` above) |
 | `GET /auth/tokens` | the caller's own tokens (id, label, created, last_used — never the token value) |
 | `POST /auth/tokens` | body `{"label"}` → `{"id","token"}`, token shown once, never stored in plaintext (ruling 4.7: `sha256(token)` is what's on disk; `/auth/tokens` list can never show it again) |
 | `DELETE /auth/tokens/{id}` | revoke one of the caller's own tokens, 204 |
@@ -307,8 +308,19 @@ reads the current `groups/index.yaml` / `groups/<slug>/group.yaml` /
 `processors.yaml` from `tree`, applies the change, and re-marshals it.
 
 ### Endpoints (gated with `auth.Require("task-author", ...)`, registered by
-a new `Register(a *api.API, st *store.Store) ` in `internal/catalogdraft/http.go`,
-same call-it-before-`a.Handler()` convention as `merge.Register`)
+a new `Register(a *api.API, st *store.Store, onPublish func()) ` in
+`internal/catalogdraft/http.go`, same call-it-before-`a.Handler()` convention
+as `merge.Register`. `onPublish`, which may be nil, is called synchronously
+after a successful `Publish` (a clean fast-forward or a clean resolved
+merge — never on a 409 or other error), mirroring `merge.Register`'s
+`onMainMoved` (ruling 18): `cmd/custos` wires it to the same
+`distribute.Reconcile` call `OnCatalogPush` already drives, since a draft
+publish moves the catalog's `main` outside a `git push` exactly the way a
+workspace fork/merge moves a workspace's `main` outside one. This closes
+the gap plan 4b's own "Open questions for the cross-plan reviewer" raised:
+without it, workspaces pinned to the catalog never saw a draft publish's
+new commit until some unrelated future `git push` to `catalog.git`
+happened to trigger `OnCatalogPush`.)
 
 | Method and path | Purpose |
 | --- | --- |
@@ -563,3 +575,17 @@ so no new Go tests beyond whatever 4b/4c endpoints needed and already got.
 16. The frontend takes on no drag-and-drop or graph-drawing npm dependency
     in this phase; the group tree and version graph use plain HTML/CSS
     approaches.
+17. `catalogdraft.Register` takes an `onPublish func()` callback, called
+    synchronously after a successful `Publish`, exactly mirroring
+    `merge.Register`'s `onMainMoved`; `cmd/custos` wires it to the same
+    `distribute.Reconcile` call `OnCatalogPush` already drives, so a draft
+    publish reconciles pinned workspaces immediately instead of waiting for
+    an unrelated future catalog push. Added during cross-plan review of 4a-4d
+    (added to this note after plan 4b flagged the gap as an open question).
+18. `GET /auth/config` (unauthenticated, `{"oidc": bool}`) is the signal the
+    frontend uses to tell token-only mode apart from "sign in please";
+    `GET /auth/me` always answers 401 to an unauthenticated request,
+    regardless of whether OIDC is configured. Added during cross-plan
+    review after 4a's endpoint table (401 only) and 4c's `LoginView`/
+    `stores/auth.ts` (which read a 404 from `/auth/me` as the token-only
+    signal) were found to disagree.
