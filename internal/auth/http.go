@@ -173,7 +173,7 @@ func (m *Manager) handlePutRoles(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	if err != nil {
-		writeAuthError(w, http.StatusBadRequest, err.Error())
+		writeAuthError(w, httpStatusForAuthErr(err), err.Error())
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, u.Roles)
