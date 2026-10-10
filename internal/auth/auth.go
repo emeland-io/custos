@@ -9,6 +9,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"net/http"
@@ -130,6 +131,7 @@ type Manager struct {
 	secure      bool          // cookies carry the Secure attribute (the redirect URL is https)
 	cop         *http.CrossOriginProtection
 	now         func() time.Time // tests replace it
+	oidc        *oidcClient      // nil in token-only mode (Config.OIDC == nil)
 
 	mu sync.Mutex // serialises read-modify-write of users.json and of token files within this process
 }
@@ -167,8 +169,13 @@ func NewManager(cfg Config) (*Manager, error) {
 		return nil, err
 	}
 	if cfg.OIDC != nil {
-		// Replaced in Task 4 by the OIDC client; nothing passes OIDC before then.
-		return nil, errors.New("auth: OIDC sign-in is not available yet")
+		client, err := newOIDCClient(context.Background(), *cfg.OIDC)
+		if err != nil {
+			return nil, err
+		}
+		m.oidc = client
+		m.issuer = cfg.OIDC.IssuerURL
+		m.secure = strings.HasPrefix(cfg.OIDC.RedirectURL, "https://")
 	}
 	return m, nil
 }
