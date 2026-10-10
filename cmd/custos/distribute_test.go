@@ -28,6 +28,10 @@ import (
 
 const otherWorkspace = "6c7d8e9f-0a1b-4c2d-b3e4-f5a6b7c8d9e0"
 
+// ws1 is a workspace UUID used by auth tests that grant an --engineer role
+// without ever creating a real workspace for it.
+const ws1 = "5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9"
+
 var jane = gitrepo.Signature{Name: "Jane Doe", Email: "jane@example.org"}
 
 // lockedBuffer is a bytes.Buffer that the server goroutines and the test

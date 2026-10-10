@@ -20,6 +20,8 @@ Usage:
   custos clone URL DIR
   custos push [--dir DIR] [--author "NAME <EMAIL>"] [REMOTE [GIT-PUSH-ARGS...]]
   custos processor test IMAGE --answer FILE [--task FILE] [--previous DIR] [flags]
+  custos token create --data-dir DIR --email E --name "Name" [--admin] [--task-author]
+                       [--processor-author] [--engineer WORKSPACE-UUID,...] [--label TEXT]
 
 Run "custos COMMAND -h" for the flags of a command.
 `
@@ -50,6 +52,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runClone(args[1:], stdout, stderr)
 	case "push":
 		return runPush(args[1:], stdout, stderr)
+	case "token":
+		return runToken(args[1:], stdout, stderr)
 	case "processor":
 		return runProcessor(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
