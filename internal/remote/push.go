@@ -12,8 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/emeland-io/custos/internal/gitrepo"
 )
 
 // Push uploads the attachments referenced in the commits that remoteName
@@ -21,7 +19,7 @@ import (
 // git push remoteName args... Attachments are read from dir/BlobDir. When
 // an attachment is neither there nor on the server, or its local content
 // does not match its hash, nothing is pushed.
-func Push(dir, remoteName string, args []string, author gitrepo.Signature, log io.Writer) error {
+func Push(dir, remoteName string, args []string, log io.Writer) error {
 	repoURL, err := git(dir, "remote", "get-url", remoteName)
 	if err != nil {
 		return err
@@ -30,6 +28,7 @@ func Push(dir, remoteName string, args []string, author gitrepo.Signature, log i
 	if err != nil {
 		return err
 	}
+	token := bearerToken(dir, remoteName)
 	if revs := sources(args); len(revs) > 0 {
 		revList := append([]string{"rev-list"}, revs...)
 		out, err := git(dir, append(revList, "--not", "--remotes="+remoteName, "--")...)
@@ -50,7 +49,7 @@ func Push(dir, remoteName string, args []string, author gitrepo.Signature, log i
 			return err
 		}
 		for _, at := range ats {
-			if err := ensureUploaded(dir, server, at, author, log); err != nil {
+			if err := ensureUploaded(dir, server, at, token, log); err != nil {
 				return err
 			}
 		}
@@ -135,8 +134,8 @@ func tipRevs(dir string, revs []string) ([]string, error) {
 }
 
 // ensureUploaded uploads one attachment unless the server has it.
-func ensureUploaded(dir, server string, at attachment, author gitrepo.Signature, log io.Writer) error {
-	ok, err := onServer(server, at.sha)
+func ensureUploaded(dir, server string, at attachment, token string, log io.Writer) error {
+	ok, err := onServer(server, at.sha, token)
 	if err != nil || ok {
 		return err
 	}
@@ -169,7 +168,7 @@ func ensureUploaded(dir, server string, at attachment, author gitrepo.Signature,
 	}
 	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set(authorHeader, author.String())
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -187,8 +186,13 @@ func ensureUploaded(dir, server string, at attachment, author gitrepo.Signature,
 }
 
 // onServer reports whether the server has a blob.
-func onServer(server, sha string) (bool, error) {
-	resp, err := http.Head(server + "/api/blobs/" + sha)
+func onServer(server, sha, token string) (bool, error) {
+	req, err := http.NewRequest(http.MethodHead, server+"/api/blobs/"+sha, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, err
 	}

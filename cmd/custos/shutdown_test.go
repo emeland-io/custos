@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/proctest"
 	"github.com/emeland-io/custos/internal/runs"
@@ -89,7 +90,7 @@ func TestServeShutdownWaitsForProcessorWorkers(t *testing.T) {
 	before := runningRunContainers(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	srv, err := openServer(ctx, data, "http://127.0.0.1:8080", defaultProcessorOptions(), io.Discard)
+	srv, err := openServer(ctx, data, "http://127.0.0.1:8080", defaultProcessorOptions(), auth.Config{DataDir: data}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,10 +100,11 @@ func TestServeShutdownWaitsForProcessorWorkers(t *testing.T) {
 	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
+	token := bootstrapAdmin(t, data)
 
 	ws := fixture.WorkspaceID
-	apiCall(t, ts, "POST", "/api/workspaces", `{"id":"`+ws+`"}`, http.StatusCreated, nil)
-	apiCall(t, ts, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskB, `{"value":"task host Host one"}`, http.StatusOK, nil)
+	apiCall(t, ts, token, "POST", "/api/workspaces", `{"id":"`+ws+`"}`, http.StatusCreated, nil)
+	apiCall(t, ts, token, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskB, `{"value":"task host Host one"}`, http.StatusOK, nil)
 
 	// Wait for the loop processor's own container to actually be up
 	// before triggering shutdown, so the test exercises a run that is
@@ -180,7 +182,7 @@ func TestServeShutdownDoesNotWaitForQueuedBacklog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	procOpts := defaultProcessorOptions()
 	procOpts.workers = 1
-	srv, err := openServer(ctx, data, "http://127.0.0.1:8080", procOpts, io.Discard)
+	srv, err := openServer(ctx, data, "http://127.0.0.1:8080", procOpts, auth.Config{DataDir: data}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,11 +192,12 @@ func TestServeShutdownDoesNotWaitForQueuedBacklog(t *testing.T) {
 	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
+	token := bootstrapAdmin(t, data)
 
 	ws := fixture.WorkspaceID
-	apiCall(t, ts, "POST", "/api/workspaces", `{"id":"`+ws+`"}`, http.StatusCreated, nil)
-	apiCall(t, ts, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskA, `{"value":"a"}`, http.StatusOK, nil)
-	apiCall(t, ts, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskB, `{"value":"task host Host one"}`, http.StatusOK, nil)
+	apiCall(t, ts, token, "POST", "/api/workspaces", `{"id":"`+ws+`"}`, http.StatusCreated, nil)
+	apiCall(t, ts, token, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskA, `{"value":"a"}`, http.StatusOK, nil)
+	apiCall(t, ts, token, "PUT", "/api/workspaces/"+ws+"/answers/"+fixture.TaskB, `{"value":"task host Host one"}`, http.StatusOK, nil)
 
 	// Wait until the backlog this test needs actually exists: one run's
 	// container is up (the single worker took it) and the other answer's
@@ -206,7 +209,7 @@ func TestServeShutdownDoesNotWaitForQueuedBacklog(t *testing.T) {
 			return false
 		}
 		var rs []runs.Record
-		apiCall(t, ts, "GET", "/api/workspaces/"+ws+"/runs", "", http.StatusOK, &rs)
+		apiCall(t, ts, token, "GET", "/api/workspaces/"+ws+"/runs", "", http.StatusOK, &rs)
 		queued, running := 0, 0
 		for _, r := range rs {
 			switch r.State {
@@ -271,7 +274,7 @@ func TestServeShutdownDoesNotWaitForQueuedBacklog(t *testing.T) {
 	// as TestRestartAfterRealCancellation checks for a single interrupted
 	// run; neither is lost or marked failed.
 	var rs []runs.Record
-	apiCall(t, ts, "GET", "/api/workspaces/"+ws+"/runs", "", http.StatusOK, &rs)
+	apiCall(t, ts, token, "GET", "/api/workspaces/"+ws+"/runs", "", http.StatusOK, &rs)
 	var sawQueued, sawRunning bool
 	for _, r := range rs {
 		switch r.State {

@@ -13,6 +13,7 @@ import (
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/blobs"
 	"github.com/emeland-io/custos/internal/fixture"
+	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/task"
 )
 
@@ -41,12 +42,23 @@ func call(h http.Handler, method, path, author, body string) *httptest.ResponseR
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if author != "" {
-		req.Header.Set("X-Custos-Author", author)
+		sig, err := gitrepo.ParseSignature(author)
+		if err != nil {
+			panic(err)
+		}
+		req = req.WithContext(api.WithCaller(req.Context(), allCaller{sig}))
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
 }
+
+// allCaller holds every role for every workspace — this file tests
+// fork/merge/branch logic, not authorization.
+type allCaller struct{ sig gitrepo.Signature }
+
+func (c allCaller) Signature() gitrepo.Signature      { return c.sig }
+func (c allCaller) Has(role, workspaceID string) bool { return true }
 
 func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()

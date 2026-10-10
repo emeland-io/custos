@@ -39,12 +39,12 @@ func (a *API) routes() {
 	a.Handle("POST /api/blobs", a.postBlob)
 	a.Handle("GET /api/blobs/{sha256}", a.getBlob) // GET patterns also match HEAD
 	a.Handle("GET /api/workspaces", a.listWorkspaces)
-	a.Handle("POST /api/workspaces", a.createWorkspace)
+	a.Handle("POST /api/workspaces", RequireRole("admin", "", a.createWorkspace))
 	a.Handle("GET /api/catalog", a.getCatalog)
 	a.Handle("GET /api/catalog/tasks/{id}", a.getCatalogTask)
 	a.Handle("GET /api/workspaces/{id}/status", a.getStatus)
 	a.Handle("GET /api/workspaces/{id}/book", a.getBook)
 	a.Handle("GET /api/workspaces/{id}/answers/{task}", a.getAnswer)
-	a.Handle("PUT /api/workspaces/{id}/answers/{task}", a.putAnswer)
-	a.Handle("POST /api/workspaces/{id}/answers/{task}/still-valid", a.stillValid)
+	a.Handle("PUT /api/workspaces/{id}/answers/{task}", RequireRole("engineer", "id", a.putAnswer))
+	a.Handle("POST /api/workspaces/{id}/answers/{task}/still-valid", RequireRole("engineer", "id", a.stillValid))
 }

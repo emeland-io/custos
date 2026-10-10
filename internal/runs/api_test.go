@@ -10,6 +10,7 @@ import (
 
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/fixture"
+	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/proctest"
 	"github.com/emeland-io/custos/internal/proposal"
 )
@@ -22,10 +23,21 @@ func handler(e *env) http.Handler {
 	return a.Handler()
 }
 
+// allCaller holds every role for every workspace — this file tests
+// processor/run/proposal logic, not authorization.
+type allCaller struct{ sig gitrepo.Signature }
+
+func (c allCaller) Signature() gitrepo.Signature      { return c.sig }
+func (c allCaller) Has(role, workspaceID string) bool { return true }
+
 func call(h http.Handler, method, path, author, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if author != "" {
-		req.Header.Set("X-Custos-Author", author)
+		sig, err := gitrepo.ParseSignature(author)
+		if err != nil {
+			panic(err)
+		}
+		req = req.WithContext(api.WithCaller(req.Context(), allCaller{sig}))
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

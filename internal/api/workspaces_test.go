@@ -49,8 +49,10 @@ func TestCreateWorkspaceErrors(t *testing.T) {
 		code               int
 	}{
 		{"exists", janeHeader, body, http.StatusConflict},
+		// "bad author" (a malformed X-Custos-Author header, e.g. "Jane")
+		// is removed: Author no longer parses anything out of the request
+		// itself, so there is no equivalent malformed-input case any more.
 		{"no author", "", `{"id":"` + otherWorkspace + `"}`, http.StatusUnauthorized},
-		{"bad author", "Jane", `{"id":"` + otherWorkspace + `"}`, http.StatusUnauthorized},
 		{"path in id", janeHeader, `{"id":"../escape"}`, http.StatusBadRequest},
 		{"id of wrong type", janeHeader, `{"id":5}`, http.StatusBadRequest},
 		{"unknown field", janeHeader, `{"name":"x"}`, http.StatusBadRequest},

@@ -12,11 +12,29 @@ import (
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/blobs"
 	"github.com/emeland-io/custos/internal/fixture"
+	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/task"
 )
 
-const authorHeader = "Jane Doe <jane@example.org>"
+const authorHeader = "X-Test-Signed-In" // this package's own tests only; not read anywhere in production
+
+// testAuth stands in for auth.Middleware: a request carrying authorHeader
+// resolves to a caller with every role; this package's tests are about
+// distribute's own endpoints, not about session/token resolution.
+func testAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(authorHeader) != "" {
+			r = r.WithContext(api.WithCaller(r.Context(), allCaller{gitrepo.Signature{Name: "Jane Doe", Email: "jane@example.org"}}))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type allCaller struct{ sig gitrepo.Signature }
+
+func (c allCaller) Signature() gitrepo.Signature      { return c.sig }
+func (c allCaller) Has(role, workspaceID string) bool { return true }
 
 func serveAPI(t *testing.T, st *store.Store) string {
 	t.Helper()
@@ -26,7 +44,7 @@ func serveAPI(t *testing.T, st *store.Store) string {
 	}
 	a := api.New(st, bl)
 	Register(a, st)
-	ts := httptest.NewServer(a.Handler())
+	ts := httptest.NewServer(testAuth(a.Handler()))
 	t.Cleanup(ts.Close)
 	return ts.URL
 }
@@ -41,7 +59,7 @@ func call(t *testing.T, method, url, author, body string) (int, string) {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if author != "" {
-		req.Header.Set("X-Custos-Author", author)
+		req.Header.Set(authorHeader, "1")
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -64,7 +82,7 @@ func TestAPIFreezeProposeAccept(t *testing.T) {
 	if code, body := call(t, "POST", ws+"/freeze", "", ""); code != http.StatusUnauthorized || !strings.Contains(body, `"error"`) {
 		t.Fatalf("freeze without author: %d %s", code, body)
 	}
-	if code, body := call(t, "POST", ws+"/freeze", authorHeader, ""); code != http.StatusOK || !strings.Contains(body, `"frozen":true`) {
+	if code, body := call(t, "POST", ws+"/freeze", "1", ""); code != http.StatusOK || !strings.Contains(body, `"frozen":true`) {
 		t.Fatalf("freeze: %d %s", code, body)
 	}
 	c2 := newTaskAVersion(t, st, "1.2.0", "1.1.0")
@@ -88,23 +106,23 @@ func TestAPIFreezeProposeAccept(t *testing.T) {
 		t.Fatalf("proposals: %d %s", code, body)
 	}
 
-	if code, body := call(t, "POST", ws+"/proposals/accept", authorHeader, `{}`); code != http.StatusBadRequest {
+	if code, body := call(t, "POST", ws+"/proposals/accept", "1", `{}`); code != http.StatusBadRequest {
 		t.Errorf("accept without branch: %d %s", code, body)
 	}
-	if code, body := call(t, "POST", ws+"/proposals/accept", authorHeader, `{"branch":"custos/pin/`+strings.Repeat("a", 40)+`"}`); code != http.StatusNotFound {
+	if code, body := call(t, "POST", ws+"/proposals/accept", "1", `{"branch":"custos/pin/`+strings.Repeat("a", 40)+`"}`); code != http.StatusNotFound {
 		t.Errorf("accept unknown branch: %d %s", code, body)
 	}
 	if code, body := call(t, "POST", ws+"/proposals/accept", "", `{"branch":"custos/pin/`+c2+`"}`); code != http.StatusUnauthorized {
 		t.Errorf("accept without author: %d %s", code, body)
 	}
-	if code, body := call(t, "POST", ws+"/proposals/accept", authorHeader, `{"branch":"custos/pin/`+c2+`"}`); code != http.StatusOK {
+	if code, body := call(t, "POST", ws+"/proposals/accept", "1", `{"branch":"custos/pin/`+c2+`"}`); code != http.StatusOK {
 		t.Fatalf("accept: %d %s", code, body)
 	}
 	if c := configAt(t, wsRepo(t, st, wsA), "refs/heads/main"); c.Catalog.Commit != c2 {
 		t.Errorf("pin after accept %s", c.Catalog.Commit)
 	}
 
-	if code, body := call(t, "POST", ws+"/unfreeze", authorHeader, ""); code != http.StatusOK || !strings.Contains(body, `"frozen":false`) {
+	if code, body := call(t, "POST", ws+"/unfreeze", "1", ""); code != http.StatusOK || !strings.Contains(body, `"frozen":false`) {
 		t.Errorf("unfreeze: %d %s", code, body)
 	}
 }
@@ -124,7 +142,7 @@ func TestAPIUnfreezeWarnsOnFailedReconcile(t *testing.T) {
 	commitCatalog(t, st, nil, fixture.TaskPath(fixture.TaskA, "1.0.0"), fixture.TaskPath(fixture.TaskA, "1.1.0"))
 	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
 
-	code, body := call(t, "POST", ws+"/unfreeze", authorHeader, "")
+	code, body := call(t, "POST", ws+"/unfreeze", "1", "")
 	if code != http.StatusOK {
 		t.Fatalf("unfreeze: %d %s, want 200 with a warning", code, body)
 	}
@@ -150,7 +168,7 @@ func TestAPIUnfreezeWarnsOnFailedReconcile(t *testing.T) {
 func TestAPIReject(t *testing.T) {
 	st, _, _, c2 := frozenWithProposal(t)
 	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
-	if code, body := call(t, "POST", ws+"/proposals/reject", authorHeader, `{"branch":"custos/pin/`+c2+`"}`); code != http.StatusOK {
+	if code, body := call(t, "POST", ws+"/proposals/reject", "1", `{"branch":"custos/pin/`+c2+`"}`); code != http.StatusOK {
 		t.Fatalf("reject: %d %s", code, body)
 	}
 	if code, body := call(t, "GET", ws+"/proposals", "", ""); code != http.StatusOK || strings.TrimSpace(body) != "[]" {
@@ -170,8 +188,8 @@ func TestAPIWorkspaceWithoutMain(t *testing.T) {
 	ws := serveAPI(t, st) + "/api/workspaces/" + wsA
 	for _, c := range []struct{ method, path, author string }{
 		{"GET", "/proposals", ""},
-		{"POST", "/freeze", authorHeader},
-		{"POST", "/unfreeze", authorHeader},
+		{"POST", "/freeze", "1"},
+		{"POST", "/unfreeze", "1"},
 	} {
 		if code, body := call(t, c.method, ws+c.path, c.author, ""); code != http.StatusNotFound {
 			t.Errorf("%s %s: %d %s, want 404", c.method, c.path, code, body)
@@ -186,8 +204,8 @@ func TestAPIUnknownWorkspace(t *testing.T) {
 	for _, c := range []struct{ method, path, author string }{
 		{"GET", "/proposals", ""},
 		{"GET", "/pin-diff", ""},
-		{"POST", "/freeze", authorHeader},
-		{"POST", "/unfreeze", authorHeader},
+		{"POST", "/freeze", "1"},
+		{"POST", "/unfreeze", "1"},
 	} {
 		if code, body := call(t, c.method, ws+c.path, c.author, ""); code != http.StatusNotFound {
 			t.Errorf("%s %s: %d %s", c.method, c.path, code, body)

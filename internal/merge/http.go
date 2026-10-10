@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/emeland-io/custos/internal/api"
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/store"
 )
 
@@ -33,8 +34,8 @@ const maxBody = 64 << 20
 // Result.Rerun is not empty, with the target workspace id and those task
 // ids; the caller reruns their processors on the merged answers (§4.4).
 func Register(a *api.API, st *store.Store, onMainMoved func(id string), onRerun func(id string, tasks []string)) {
-	a.Handle("POST /api/workspaces/{id}/fork", func(w http.ResponseWriter, r *http.Request) { handleFork(st, onMainMoved, w, r) })
-	a.Handle("POST /api/workspaces/{id}/merge", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, onMainMoved, onRerun, w, r) })
+	a.Handle("POST /api/workspaces/{id}/fork", auth.Require(auth.RoleAdmin, func(w http.ResponseWriter, r *http.Request) { handleFork(st, onMainMoved, w, r) }))
+	a.Handle("POST /api/workspaces/{id}/merge", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) { handleMerge(st, onMainMoved, onRerun, w, r) }))
 	a.Handle("GET /api/workspaces/{id}/branches", func(w http.ResponseWriter, r *http.Request) { handleBranches(st, w, r) })
 }
 

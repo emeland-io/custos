@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/emeland-io/custos/internal/api"
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/proposal"
 	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/task"
@@ -53,7 +54,7 @@ func Register(a *api.API, s *Service) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Write(log)
 	})
-	a.Handle("POST /api/workspaces/{id}/runs/{run}/retry", func(w http.ResponseWriter, r *http.Request) {
+	a.Handle("POST /api/workspaces/{id}/runs/{run}/retry", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := api.Author(r); err != nil {
 			writeError(w, err)
 			return
@@ -64,7 +65,7 @@ func Register(a *api.API, s *Service) {
 			return
 		}
 		api.WriteJSON(w, http.StatusAccepted, rec)
-	})
+	}))
 	a.Handle("GET /api/workspaces/{id}/processor-proposals", func(w http.ResponseWriter, r *http.Request) {
 		ps, err := proposal.List(s.st, r.PathValue("id"))
 		if err != nil {
@@ -90,7 +91,7 @@ func Register(a *api.API, s *Service) {
 		}
 		api.WriteJSON(w, http.StatusOK, proposalJSON(*p))
 	})
-	a.Handle("POST /api/workspaces/{id}/processor-proposals/{task}/accept", func(w http.ResponseWriter, r *http.Request) {
+	a.Handle("POST /api/workspaces/{id}/processor-proposals/{task}/accept", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) {
 		author, err := api.Author(r)
 		if err != nil {
 			writeError(w, err)
@@ -120,8 +121,8 @@ func Register(a *api.API, s *Service) {
 			res["warning"] = err.Error()
 		}
 		api.WriteJSON(w, http.StatusOK, res)
-	})
-	a.Handle("POST /api/workspaces/{id}/processor-proposals/{task}/reject", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	a.Handle("POST /api/workspaces/{id}/processor-proposals/{task}/reject", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := api.Author(r); err != nil {
 			writeError(w, err)
 			return
@@ -136,8 +137,8 @@ func Register(a *api.API, s *Service) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	})
-	a.Handle("POST /api/processors/{name}/dry-run", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	a.Handle("POST /api/processors/{name}/dry-run", auth.Require(auth.RoleProcessorAuthor, func(w http.ResponseWriter, r *http.Request) {
 		if _, err := api.Author(r); err != nil {
 			writeError(w, err)
 			return
@@ -155,7 +156,7 @@ func Register(a *api.API, s *Service) {
 			return
 		}
 		api.WriteJSON(w, http.StatusAccepted, map[string]string{"id": id})
-	})
+	}))
 	a.Handle("GET /api/dry-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := s.DryRunStatus(r.PathValue("id"))
 		if err != nil {

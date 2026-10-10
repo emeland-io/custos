@@ -10,26 +10,21 @@ import (
 	"github.com/emeland-io/custos/internal/task"
 )
 
-// authorHeader names the person a write is done for (ruling 2.6).
-const authorHeader = "X-Custos-Author"
-
 // maxJSONBytes bounds JSON request bodies. Answers are text; attachments
 // travel separately through /api/blobs.
 const maxJSONBytes = 16 << 20
 
-// Author returns the person named by X-Custos-Author. Every write endpoint
-// calls it first; its error makes WriteError answer 401.
+// Author returns the signed-in caller as the author of the commit its
+// request causes. Every write endpoint calls it first (most of them
+// behind RequireRole, which already guarantees a caller is present —
+// Author's own 401 only ever fires for an endpoint that takes no role at
+// all, such as POST /api/blobs).
 func Author(r *http.Request) (gitrepo.Signature, error) {
-	h := r.Header.Get(authorHeader)
-	if h == "" {
-		return gitrepo.Signature{}, errorf(http.StatusUnauthorized,
-			"header %s is missing; send %s: Name <email>", authorHeader, authorHeader)
+	c, ok := CallerOf(r)
+	if !ok {
+		return gitrepo.Signature{}, errNotSignedIn()
 	}
-	sig, err := gitrepo.ParseSignature(h)
-	if err != nil {
-		return gitrepo.Signature{}, errorf(http.StatusUnauthorized, "header %s: %v", authorHeader, err)
-	}
-	return sig, nil
+	return c.Signature(), nil
 }
 
 // decodeJSON decodes the request body into v, rejecting unknown fields and

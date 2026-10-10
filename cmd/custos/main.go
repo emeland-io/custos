@@ -20,7 +20,7 @@ Usage:
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
   custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID
   custos clone URL DIR
-  custos push [--dir DIR] [--author "NAME <EMAIL>"] [REMOTE [GIT-PUSH-ARGS...]]
+  custos push [--dir DIR] [REMOTE [GIT-PUSH-ARGS...]]
   custos processor test IMAGE --answer FILE [--task FILE] [--previous DIR] [flags]
   custos token create --data-dir DIR --email E --name "Name" [--admin] [--task-author]
                        [--processor-author] [--engineer WORKSPACE-UUID,...] [--label TEXT]

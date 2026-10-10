@@ -40,7 +40,7 @@ func TestBlobUploadTooLarge(t *testing.T) {
 	e := newEnv(t, nil)
 	req := httptest.NewRequest("POST", "/api/blobs", strings.NewReader("x"))
 	req.ContentLength = blobs.MaxSize + 1
-	req.Header.Set("X-Custos-Author", janeHeader)
+	req = req.WithContext(WithCaller(req.Context(), allCaller{sig: jane}))
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
 	decode[errorJSON](t, rec, http.StatusRequestEntityTooLarge)

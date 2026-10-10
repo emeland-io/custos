@@ -5,13 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/emeland-io/custos/internal/api"
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/blobs"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/frontmatter"
@@ -65,19 +66,35 @@ func startServer(t *testing.T) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := server.New(st).WithAPI(api.New(st, bl).Handler()).Handler()
+	m, err := auth.NewManager(auth.Config{DataDir: st.DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.UpdateUser("jane@example.org", func(u *auth.User) { u.Roles = auth.Roles{Admin: true} }); err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := m.CreateToken("jane@example.org", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := server.New(st).WithAPI(api.New(st, bl).Handler()).WithMiddleware(m.Middleware("/healthz")).Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword("token", token)
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
-	gittest.Run(t, work, "push", ts.URL+"/git/catalog.git", "main")
+	gittest.Run(t, work, "push", u.String()+"/git/catalog.git", "main")
 	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
 		t.Fatal(err)
 	}
-	return &testServer{st: st, bl: bl, url: ts.URL}
+	return &testServer{st: st, bl: bl, url: u.String()}
 }
 
 func (s *testServer) workspaceURL() string {
@@ -116,17 +133,5 @@ func TestServerURL(t *testing.T) {
 		if got, err := ServerURL(in); err == nil {
 			t.Errorf("ServerURL(%q) = %q, want an error", in, got)
 		}
-	}
-}
-
-func TestGitAuthor(t *testing.T) {
-	dir := gittest.Init(t)
-	gittest.Run(t, dir, "config", "user.name", "Jane Doe")
-	gittest.Run(t, dir, "config", "user.email", "jane@example.org")
-	if got, err := GitAuthor(dir); err != nil || got != jane {
-		t.Errorf("GitAuthor = %+v, %v", got, err)
-	}
-	if _, err := GitAuthor(t.TempDir()); err == nil || !strings.Contains(err.Error(), "user.name") {
-		t.Errorf("outside a repository: %v", err)
 	}
 }

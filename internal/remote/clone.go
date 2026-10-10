@@ -32,7 +32,7 @@ func Clone(repoURL, dir string, log io.Writer) error {
 	if err := excludeBlobDir(dir); err != nil {
 		return err
 	}
-	return fetchBlobs(dir, server, log)
+	return fetchBlobs(dir, server, bearerToken(dir, "origin"), log)
 }
 
 // excludeBlobDir keeps .custos/ out of git status and git add -A.
@@ -60,7 +60,7 @@ func excludeBlobDir(dir string) error {
 
 // fetchBlobs downloads the attachments of the answers in HEAD that are not
 // in dir/BlobDir yet.
-func fetchBlobs(dir, server string, log io.Writer) error {
+func fetchBlobs(dir, server, token string, log io.Writer) error {
 	if _, err := git(dir, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err != nil {
 		return nil // an empty repository has no answers yet
 	}
@@ -73,7 +73,7 @@ func fetchBlobs(dir, server string, log io.Writer) error {
 		if _, err := os.Stat(dest); err == nil {
 			continue
 		}
-		err := download(server, at.sha, dest)
+		err := download(server, at.sha, token, dest)
 		if errors.Is(err, errUnavailable) {
 			fmt.Fprintf(log, "attachment %q in %s is unavailable: the server has no blob %s\n", at.name, at.path, at.sha)
 			continue
@@ -86,8 +86,13 @@ func fetchBlobs(dir, server string, log io.Writer) error {
 }
 
 // download fetches one blob into dest, checking its hash before it appears.
-func download(server, sha, dest string) error {
-	resp, err := http.Get(server + "/api/blobs/" + sha)
+func download(server, sha, token, dest string) error {
+	req, err := http.NewRequest(http.MethodGet, server+"/api/blobs/"+sha, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}

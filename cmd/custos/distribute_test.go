@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/emeland-io/custos/internal/api"
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/blobs"
 	"github.com/emeland-io/custos/internal/distribute"
 	"github.com/emeland-io/custos/internal/fixture"
@@ -56,8 +58,11 @@ func (l *lockedBuffer) String() string {
 // wired opens a store in a fresh data directory with hooks that run exe and
 // wires distribution and the merge/fork endpoints the way serve does,
 // including reconciling a workspace right after an API merge or fork moves
-// its main (openServer's onMainMoved).
-func wired(t *testing.T, exe string, log *lockedBuffer) (*store.Store, *server.Server) {
+// its main (openServer's onMainMoved). It also bootstraps jane@example.org
+// as an admin, the way custos token create would for a real operator, and
+// returns her token: every request through the server this returns needs
+// a signed-in caller now (ruling 4.10), git included.
+func wired(t *testing.T, exe string, log *lockedBuffer) (*store.Store, *server.Server, string) {
 	t.Helper()
 	data := t.TempDir()
 	st, err := store.Open(data, exe, "http://127.0.0.1:8080")
@@ -77,10 +82,35 @@ func wired(t *testing.T, exe string, log *lockedBuffer) (*store.Store, *server.S
 			fmt.Fprintf(log, "custos serve: workspace %s: %v\n", id, err)
 		}
 	}, nil)
+	m, err := auth.NewManager(auth.Config{DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.UpdateUser("jane@example.org", func(u *auth.User) { u.Roles = auth.Roles{Admin: true} }); err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := m.CreateToken("jane@example.org", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := server.New(st)
 	startDistribution(st, a, srv, log)
 	srv.WithAPI(a.Handler())
-	return st, srv
+	srv.WithMiddleware(m.Middleware("/healthz"))
+	return st, srv, token
+}
+
+// authedURL returns rawURL with token embedded as the password half of its
+// userinfo, the same way a real git remote URL (or custos push's own)
+// carries a credential.
+func authedURL(t *testing.T, rawURL, token string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword("token", token)
+	return u.String()
 }
 
 func pinOf(t *testing.T, st *store.Store, id string) string {
@@ -99,14 +129,14 @@ func TestCatalogPushIsDistributed(t *testing.T) {
 		t.Fatalf("build custos: %v\n%s", err, out)
 	}
 	var log lockedBuffer
-	st, srv := wired(t, bin, &log)
+	st, srv, token := wired(t, bin, &log)
 	h, err := srv.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
-	remote := ts.URL + "/git/catalog.git"
+	remote := authedURL(t, ts.URL, token) + "/git/catalog.git"
 
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
@@ -159,14 +189,14 @@ func TestWorkspacePushIsDistributed(t *testing.T) {
 		t.Fatalf("build custos: %v\n%s", err, out)
 	}
 	var log lockedBuffer
-	st, srv := wired(t, bin, &log)
+	st, srv, token := wired(t, bin, &log)
 	h, err := srv.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
-	catalogRemote := ts.URL + "/git/catalog.git"
+	catalogRemote := authedURL(t, ts.URL, token) + "/git/catalog.git"
 
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
@@ -204,7 +234,8 @@ func TestWorkspacePushIsDistributed(t *testing.T) {
 	// API, and with no further catalog push: ReconcileWorkspace must still
 	// move the pin and prune the now-unneeded proposal.
 	clone := filepath.Join(t.TempDir(), "ws")
-	gittest.Run(t, t.TempDir(), "clone", "--quiet", ts.URL+"/git/workspaces/"+fixture.WorkspaceID+".git", clone)
+	workspaceRemote := authedURL(t, ts.URL, token) + "/git/workspaces/" + fixture.WorkspaceID + ".git"
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", workspaceRemote, clone)
 	gittest.Commit(t, clone, map[string]string{"custos.yaml": fixture.Config(fixture.WorkspaceID, c1)})
 	gittest.Run(t, clone, "push", "--quiet", "origin", "main")
 
@@ -318,14 +349,14 @@ func TestMergeThroughAPIIsDistributed(t *testing.T) {
 		t.Fatalf("build custos: %v\n%s", out, err)
 	}
 	var log lockedBuffer
-	st, srv := wired(t, bin, &log)
+	st, srv, token := wired(t, bin, &log)
 	h, err := srv.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	defer ts.Close()
-	catalogRemote := ts.URL + "/git/catalog.git"
+	catalogRemote := authedURL(t, ts.URL, token) + "/git/catalog.git"
 
 	work := gittest.Init(t)
 	gittest.Commit(t, work, fixture.Catalog())
@@ -364,7 +395,8 @@ func TestMergeThroughAPIIsDistributed(t *testing.T) {
 	// reconciles main, which is still frozen and unchanged, so this alone
 	// moves nothing.
 	clone := filepath.Join(t.TempDir(), "ws")
-	gittest.Run(t, t.TempDir(), "clone", "--quiet", ts.URL+"/git/workspaces/"+fixture.WorkspaceID+".git", clone)
+	workspaceRemote := authedURL(t, ts.URL, token) + "/git/workspaces/" + fixture.WorkspaceID + ".git"
+	gittest.Run(t, t.TempDir(), "clone", "--quiet", workspaceRemote, clone)
 	gittest.Run(t, clone, "checkout", "-q", "-b", "unfreeze")
 	gittest.Commit(t, clone, map[string]string{"custos.yaml": unfrozenConfig(st, fixture.WorkspaceID, c1)})
 	gittest.Run(t, clone, "push", "--quiet", "origin", "unfreeze")
@@ -385,7 +417,7 @@ func TestMergeThroughAPIIsDistributed(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Custos-Author", "Jane Doe <jane@example.org>")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

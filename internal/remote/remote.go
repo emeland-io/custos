@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -22,7 +23,33 @@ import (
 // Clone keeps .custos/ out of git status through .git/info/exclude.
 const BlobDir = ".custos/blobs/sha256"
 
-const authorHeader = "X-Custos-Author"
+// tokenEnv names the environment variable holding custos's own personal
+// access token, read by Push and Clone's own HTTP requests to /api/blobs
+// — reading and writing blobs now needs a signed-in caller like
+// everything else (ruling 4.10), and these requests carry none of the
+// git subprocess's own credentials.
+const tokenEnv = "CUSTOS_TOKEN"
+
+// bearerToken returns the token to send with Push/Clone's own HTTP
+// requests: $CUSTOS_TOKEN, or — so a plain
+// "git clone https://<id>.<secret>@host/git/..." URL just works without
+// also exporting the variable — the password half of remoteName's own
+// URL (what git itself already used to authenticate the clone or push).
+func bearerToken(dir, remoteName string) string {
+	if t := os.Getenv(tokenEnv); t != "" {
+		return t
+	}
+	repoURL, err := git(dir, "remote", "get-url", remoteName)
+	if err != nil {
+		return ""
+	}
+	u, err := url.Parse(repoURL)
+	if err != nil || u.User == nil {
+		return ""
+	}
+	pw, _ := u.User.Password()
+	return pw
+}
 
 // ServerURL returns the base URL of the custos server that serves the
 // repository at repoURL: everything before "/git/".
@@ -37,24 +64,6 @@ func ServerURL(repoURL string) (string, error) {
 	}
 	u.Path, u.RawPath, u.RawQuery, u.Fragment = u.Path[:i], "", "", ""
 	return u.String(), nil
-}
-
-// GitAuthor returns the person configured as user.name and user.email in
-// the checkout dir.
-func GitAuthor(dir string) (gitrepo.Signature, error) {
-	const hint = `set git config user.name and user.email, or pass --author "Name <email>"`
-	if _, err := git(dir, "rev-parse", "--git-dir"); err != nil {
-		return gitrepo.Signature{}, fmt.Errorf("%s is not a git checkout; %s", dir, hint)
-	}
-	name, err := git(dir, "config", "user.name")
-	if err != nil {
-		return gitrepo.Signature{}, fmt.Errorf("user.name is not set; %s", hint)
-	}
-	email, err := git(dir, "config", "user.email")
-	if err != nil {
-		return gitrepo.Signature{}, fmt.Errorf("user.email is not set; %s", hint)
-	}
-	return gitrepo.ParseSignature(name + " <" + email + ">")
 }
 
 // git runs git in dir and returns its trimmed standard output.

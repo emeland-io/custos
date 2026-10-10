@@ -32,7 +32,7 @@ func TestPushAllScansEveryBranch(t *testing.T) {
 	commitAnswer(t, dir, shaMain)
 
 	var log bytes.Buffer
-	if err := Push(dir, "origin", []string{"--all"}, jane, &log); err != nil {
+	if err := Push(dir, "origin", []string{"--all"}, &log); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 	if !s.bl.Has(shaMain) {
@@ -63,7 +63,7 @@ func TestPushHealsAttachmentMissedByPlainGitPush(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	if err := Push(dir, "origin", []string{"main"}, jane, &log); err != nil {
+	if err := Push(dir, "origin", []string{"main"}, &log); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 	if !s.bl.Has(sha) {
@@ -117,7 +117,7 @@ func TestPushUploadsAttachments(t *testing.T) {
 	head := commitAnswer(t, dir, sha)
 
 	var log bytes.Buffer
-	if err := Push(dir, "origin", []string{"main"}, jane, &log); err != nil {
+	if err := Push(dir, "origin", []string{"main"}, &log); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 	if !s.bl.Has(sha) {
@@ -140,7 +140,7 @@ func TestPushSkipsBlobsTheServerHas(t *testing.T) {
 	}
 	head := commitAnswer(t, dir, sha) // no local copy of the blob
 	var log bytes.Buffer
-	if err := Push(dir, "origin", []string{"main"}, jane, &log); err != nil {
+	if err := Push(dir, "origin", []string{"main"}, &log); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 	if strings.Contains(log.String(), "uploaded") || remoteMain(t, s) != head {
@@ -154,7 +154,7 @@ func TestPushRefusesMissingAttachment(t *testing.T) {
 	before := remoteMain(t, s)
 	commitAnswer(t, dir, hash("only on my laptop, deleted"))
 	var log bytes.Buffer
-	err := Push(dir, "origin", []string{"main"}, jane, &log)
+	err := Push(dir, "origin", []string{"main"}, &log)
 	if err == nil || !strings.Contains(err.Error(), "neither") || !strings.Contains(err.Error(), "nothing was pushed") {
 		t.Fatalf("err %v", err)
 	}
@@ -170,7 +170,7 @@ func TestPushRefusesWrongLocalContent(t *testing.T) {
 	sha := hash("the real log\n")
 	writeLocalBlob(t, dir, sha, "something else\n")
 	commitAnswer(t, dir, sha)
-	err := Push(dir, "origin", []string{"main"}, jane, &bytes.Buffer{})
+	err := Push(dir, "origin", []string{"main"}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "holds content with hash "+hash("something else\n")) {
 		t.Fatalf("err %v", err)
 	}

@@ -18,6 +18,7 @@ func Env() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.org",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.org",
+		"GIT_TERMINAL_PROMPT=0", // a push or clone git refuses for lack of credentials fails fast instead of blocking on a prompt no test can answer
 	)
 }
 

@@ -117,7 +117,20 @@ func newEnv(t *testing.T, catalogFiles map[string]string) *env {
 	return e
 }
 
-// do sends one request to the API. An empty author sends no X-Custos-Author.
+// allCaller holds every role for every workspace. do and the handful of
+// other legacy helpers below predate per-endpoint roles and are not
+// testing authorization themselves — TestRequireRole (caller_test.go) and
+// TestPushNeedsRole/TestAPINeedsSignIn (internal/server) do that — so
+// they grant everything rather than enumerate which workspace id each
+// test happens to use.
+type allCaller struct{ sig gitrepo.Signature }
+
+func (c allCaller) Signature() gitrepo.Signature      { return c.sig }
+func (c allCaller) Has(role, workspaceID string) bool { return true }
+
+// do sends one request to the API. An empty author sends no caller
+// (anonymous); otherwise the request carries an allCaller parsed from
+// author as "Name <email>".
 func (e *env) do(t *testing.T, method, path, author, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var r io.Reader
@@ -126,7 +139,11 @@ func (e *env) do(t *testing.T, method, path, author, body string) *httptest.Resp
 	}
 	req := httptest.NewRequest(method, path, r)
 	if author != "" {
-		req.Header.Set("X-Custos-Author", author)
+		sig, err := gitrepo.ParseSignature(author)
+		if err != nil {
+			t.Fatalf("author %q: %v", author, err)
+		}
+		req = req.WithContext(WithCaller(req.Context(), allCaller{sig: sig}))
 	}
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
@@ -241,29 +258,26 @@ func TestWriteError(t *testing.T) {
 	}
 }
 
+// TestAuthor: Author now reads the caller the authentication middleware
+// put in the request's context (api.CallerOf) instead of a client-supplied
+// header. No caller in context -> 401; a caller in context -> its own
+// Signature().
 func TestAuthor(t *testing.T) {
-	for header, ok := range map[string]bool{
-		"":                            false,
-		"Jane Doe":                    false,
-		"<jane@example.org>":          false,
-		"Jane Doe <jane@example.org>": true,
-	} {
-		req := httptest.NewRequest("POST", "/api/blobs", nil)
-		if header != "" {
-			req.Header.Set("X-Custos-Author", header)
-		}
-		sig, err := Author(req)
-		if ok {
-			if err != nil || sig != jane {
-				t.Errorf("%q: %+v %v", header, sig, err)
-			}
-			continue
-		}
+	req := httptest.NewRequest("POST", "/api/blobs", nil)
+	if sig, err := Author(req); err == nil {
+		t.Errorf("no caller: sig %+v, want an error", sig)
+	} else {
 		rec := httptest.NewRecorder()
 		WriteError(rec, err)
-		if err == nil || rec.Code != http.StatusUnauthorized {
-			t.Errorf("%q: err %v, status %d", header, err, rec.Code)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("no caller: status %d, want 401", rec.Code)
 		}
+	}
+
+	req = req.WithContext(WithCaller(req.Context(), allCaller{sig: jane}))
+	sig, err := Author(req)
+	if err != nil || sig != jane {
+		t.Errorf("with caller: %+v %v", sig, err)
 	}
 }
 

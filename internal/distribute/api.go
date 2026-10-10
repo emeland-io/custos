@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/emeland-io/custos/internal/api"
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/store"
 )
@@ -14,8 +15,8 @@ import (
 // Register adds the freeze and pin proposal endpoints to a. Call it before
 // a.Handler().
 func Register(a *api.API, st *store.Store) {
-	a.Handle("POST /api/workspaces/{id}/freeze", frozenHandler(st, true))
-	a.Handle("POST /api/workspaces/{id}/unfreeze", frozenHandler(st, false))
+	a.Handle("POST /api/workspaces/{id}/freeze", auth.RequireWorkspace("id", frozenHandler(st, true)))
+	a.Handle("POST /api/workspaces/{id}/unfreeze", auth.RequireWorkspace("id", frozenHandler(st, false)))
 	a.Handle("GET /api/workspaces/{id}/proposals", func(w http.ResponseWriter, r *http.Request) {
 		ps, err := Proposals(st, r.PathValue("id"))
 		if err != nil {
@@ -24,7 +25,7 @@ func Register(a *api.API, st *store.Store) {
 		}
 		api.WriteJSON(w, http.StatusOK, ps)
 	})
-	a.Handle("POST /api/workspaces/{id}/proposals/accept", func(w http.ResponseWriter, r *http.Request) {
+	a.Handle("POST /api/workspaces/{id}/proposals/accept", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) {
 		author, ok := requireAuthor(w, r)
 		if !ok {
 			return
@@ -38,8 +39,8 @@ func Register(a *api.API, st *store.Store) {
 			return
 		}
 		api.WriteJSON(w, http.StatusOK, map[string]string{"branch": branch})
-	})
-	a.Handle("POST /api/workspaces/{id}/proposals/reject", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	a.Handle("POST /api/workspaces/{id}/proposals/reject", auth.RequireWorkspace("id", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := requireAuthor(w, r); !ok {
 			return
 		}
@@ -52,7 +53,7 @@ func Register(a *api.API, st *store.Store) {
 			return
 		}
 		api.WriteJSON(w, http.StatusOK, map[string]string{"branch": branch})
-	})
+	}))
 	a.Handle("GET /api/workspaces/{id}/pin-diff", func(w http.ResponseWriter, r *http.Request) {
 		pd, err := pinDiff(st, r.PathValue("id"))
 		if err != nil {
@@ -89,9 +90,11 @@ func frozenHandler(st *store.Store, frozen bool) http.HandlerFunc {
 	}
 }
 
-// requireAuthor answers 401 when the X-Custos-Author header is missing or
-// malformed (ruling 2.6), using api.WriteError so the body matches every
-// other error response.
+// requireAuthor answers 401 when there is no signed-in caller, using
+// api.WriteError so the body matches every other error response —
+// unreachable in practice below RequireWorkspace, which already checked,
+// but still the right thing for a route that gains one later without this
+// guard.
 func requireAuthor(w http.ResponseWriter, r *http.Request) (gitrepo.Signature, bool) {
 	author, err := api.Author(r)
 	if err != nil {
