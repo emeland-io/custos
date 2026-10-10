@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/store"
 )
 
@@ -38,6 +39,9 @@ type Server struct {
 	st  *store.Store
 	api http.Handler // mounted at /api/ when set
 
+	auth       http.Handler                    // mounted at /auth/ when set
+	middleware func(http.Handler) http.Handler // wraps the whole mux when set
+
 	mu              sync.Mutex
 	onCatalogPush   []func()
 	onWorkspacePush []func(id string)
@@ -51,6 +55,28 @@ func New(st *store.Store) *Server { return &Server{st: st} }
 // full path, including /api/. It returns s.
 func (s *Server) WithAPI(h http.Handler) *Server {
 	s.api = h
+	return s
+}
+
+// WithAuth mounts h at /auth/ in the handler Handler returns, unguarded by
+// the sign-in gate WithAPI's and /git/'s handlers get — each /auth/ route
+// (Task 5) decides for itself whether it needs a caller. It returns s.
+func (s *Server) WithAuth(h http.Handler) *Server {
+	s.auth = h
+	return s
+}
+
+// WithMiddleware wraps the whole handler Handler returns (/git/, /auth/,
+// /api/ and /healthz together) in mw, after routing — so mw sees the
+// original request path and can special-case it (auth.Manager.Middleware
+// does, for its excludedPrefixes). mw is the only thing that ever
+// resolves a caller into a request's context; Handler's own gate on
+// /api/ and /git/ only ever checks whether one is there (Review Focus 5):
+// a Server built without WithMiddleware refuses every /api/ and /git/
+// request, because nothing ever puts a caller in context for the gate to
+// find. It returns s.
+func (s *Server) WithMiddleware(mw func(http.Handler) http.Handler) *Server {
+	s.middleware = mw
 	return s
 }
 
@@ -134,14 +160,68 @@ func (s *Server) Handler() (http.Handler, error) {
 		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Join(s.st.DataDir(), "repos"), "GIT_HTTP_EXPORT_ALL=1"},
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/git/", withContentLength(s.notifyPush(backend)))
+	mux.Handle("/git/", s.requireSignedIn(true, s.pushGate(withContentLength(s.notifyPush(backend)))))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
 	if s.api != nil {
-		mux.Handle("/api/", s.api)
+		mux.Handle("/api/", s.requireSignedIn(false, s.api))
 	}
-	return mux, nil
+	if s.auth != nil {
+		mux.Handle("/auth/", s.auth)
+	}
+	var h http.Handler = mux
+	if s.middleware != nil {
+		h = s.middleware(h)
+	}
+	return h, nil
+}
+
+// requireSignedIn wraps h so it 401s before h runs when the request
+// carries no caller (api.CallerOf) — unconditionally, not only when
+// WithMiddleware happens to be wired (Review Focus 5). gitRealm adds the
+// WWW-Authenticate challenge git needs before it will send Basic
+// credentials from a URL or a credential helper; /api/ never sends it, so
+// a browser running the UI never shows its own password dialog.
+func (s *Server) requireSignedIn(gitRealm bool, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := api.CallerOf(r); !ok {
+			if gitRealm {
+				w.Header().Set("WWW-Authenticate", `Basic realm="custos"`)
+			}
+			http.Error(w, "not signed in", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// pushGate wraps the /git/ handler so a push to the catalog needs the
+// task-author role and a push to a workspace needs the engineer role for
+// that workspace (Review Focus 4), checked before h runs — so before
+// withContentLength or git http-backend read one byte of the request
+// body. Reading (info/refs, upload-pack) is not matched here, so it is
+// unaffected: requireSignedIn already covers it. The caller is always
+// present: pushGate only ever wraps requireSignedIn's h.
+func (s *Server) pushGate(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			c, _ := api.CallerOf(r)
+			switch {
+			case slices.Contains(catalogPushPaths[:], r.URL.Path):
+				if !c.Has("task-author", "") {
+					http.Error(w, "this push needs the task-author role", http.StatusForbidden)
+					return
+				}
+			default:
+				if m := workspacePushPath.FindStringSubmatch(r.URL.Path); m != nil && !c.Has("engineer", m[1]) {
+					http.Error(w, "this push needs the engineer role for workspace "+m[1], http.StatusForbidden)
+					return
+				}
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // notifyPush wraps h so that, once it has served the request, a push to the

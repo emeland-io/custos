@@ -14,6 +14,8 @@ Usage:
   custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL] [--container-runtime CMD]
                [--secrets-dir DIR] [--processor-memory SIZE] [--processor-workers N]
                [--max-generation-depth N] [--trusted-keys DIR]
+               [--oidc-issuer-url URL] [--oidc-client-id ID] [--oidc-client-secret SECRET]
+               [--oidc-redirect-url URL] [--admin-emails EMAILS] [--session-secret HEX]
   custos validate [--against REV] [DIR]
   custos task new-version (--patch | --minor | --major) [--dir DIR] TASK-UUID
   custos workspace create [--data-dir DIR] [--public-url URL] --author "Name <email>" WORKSPACE-UUID

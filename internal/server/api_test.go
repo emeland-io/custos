@@ -21,11 +21,15 @@ func TestWithAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Without WithMiddleware, nothing ever resolves a caller, so WithAPI
+	// alone still refuses every /api/ request (Review Focus 5; the happy
+	// path with a real caller is TestAPINeedsSignIn in auth_test.go).
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/workspaces", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "api /api/workspaces" {
-		t.Errorf("%d %q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("without WithMiddleware: %d, want 401", rec.Code)
 	}
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Body.String() != "ok\n" {

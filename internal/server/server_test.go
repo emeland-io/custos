@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/gittest"
@@ -36,7 +38,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// start serves a new data directory the way custos serve does.
+// start serves a new data directory the way custos serve does, with a
+// bootstrap admin whose token is embedded in the returned URL — Admin
+// implies every role, so every existing test below that pushes or clones
+// through this URL keeps working unchanged; tests about roles themselves
+// live in auth_test.go's startAuthed, which mints its own tokens per role.
 func start(t *testing.T) (*store.Store, *Server, string) {
 	t.Helper()
 	st, err := store.Open(t.TempDir(), custosBin, "http://custos.test")
@@ -46,14 +52,30 @@ func start(t *testing.T) (*store.Store, *Server, string) {
 	if err := st.InstallHooks(); err != nil {
 		t.Fatal(err)
 	}
-	srv := New(st)
+	m, err := auth.NewManager(auth.Config{DataDir: st.DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.UpdateUser("jane@example.org", func(u *auth.User) { u.Roles = auth.Roles{Admin: true} }); err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := m.CreateToken("jane@example.org", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(st).WithMiddleware(m.Middleware("/healthz"))
 	h, err := srv.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	return st, srv, ts.URL
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword("token", token)
+	return st, srv, u.String()
 }
 
 var jane = gitrepo.Signature{Name: "Jane Doe", Email: "jane@example.org"}

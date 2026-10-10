@@ -15,13 +15,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/distribute"
 	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
 	"github.com/emeland-io/custos/internal/store"
 )
 
-// defaultAddr listens on loopback only: there is no authentication yet.
+// defaultAddr listens on loopback only by default; the operator may widen
+// it since every request now needs a signed-in caller or a valid token.
 const defaultAddr = "127.0.0.1:8080"
 
 // defaultPublicURL is where clients reach a server on defaultAddr.
@@ -31,9 +33,12 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	dataDir := fl.String("data-dir", os.Getenv("CUSTOS_DATA_DIR"), "directory holding the repositories (env CUSTOS_DATA_DIR)")
-	addr := fl.String("addr", envOr("CUSTOS_ADDR", defaultAddr), "listen address (env CUSTOS_ADDR); there is no authentication yet, so keep it on loopback unless the network is trusted")
+	addr := fl.String("addr", envOr("CUSTOS_ADDR", defaultAddr),
+		"listen address (env CUSTOS_ADDR); every request still needs a signed-in caller or a valid token, "+
+			"but TLS is the operator's own job (a reverse proxy, typically) — custos itself only ever speaks plain HTTP")
 	publicURL := publicURLFlag(fl)
 	procFlags := defineProcessorFlags(fl)
+	authFlags := defineAuthFlags(fl)
 	if err := fl.Parse(args); err != nil {
 		return helpOrUsage(err)
 	}
@@ -50,11 +55,16 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 2
 	}
+	authCfg, err := authFlags.config(*publicURL)
+	if err != nil {
+		fmt.Fprintf(stderr, "custos serve: %v\n", err)
+		return 2
+	}
 	// The context also stops the processor workers; runs it interrupts are
 	// queued again at the next start.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv, err := openServer(ctx, *dataDir, *publicURL, procOpts, stderr)
+	srv, err := openServer(ctx, *dataDir, *publicURL, procOpts, authCfg, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
@@ -131,7 +141,7 @@ func serveUntilDone(ctx context.Context, srv *server.Server, h http.Handler, add
 // reports workspaces whose main breaks the rules, for example after an edit
 // on disk (spec section 7); it serves them anyway. It starts the processor
 // workers, which stop when ctx is cancelled.
-func openServer(ctx context.Context, dataDir, publicURL string, procOpts processorOptions, stderr io.Writer) (*server.Server, error) {
+func openServer(ctx context.Context, dataDir, publicURL string, procOpts processorOptions, authCfg auth.Config, stderr io.Writer) (*server.Server, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -160,6 +170,11 @@ func openServer(ctx context.Context, dataDir, publicURL string, procOpts process
 	if err != nil {
 		return nil, err
 	}
+	authMgr, err := auth.NewManager(authCfg)
+	if err != nil {
+		return nil, fmt.Errorf("auth: %w", err)
+	}
+	auth.Register(a, authMgr)
 	svc, err := openRuns(st, procOpts)
 	if err != nil {
 		return nil, err
@@ -174,6 +189,8 @@ func openServer(ctx context.Context, dataDir, publicURL string, procOpts process
 	startDistribution(st, a, srv, stderr)
 	startRuns(ctx, st, a, srv, svc)
 	srv.WithAPI(a.Handler())
+	srv.WithAuth(a.Handler())
+	srv.WithMiddleware(authMgr.Middleware("/healthz", "/auth/login", "/auth/callback", "/"))
 	return srv, nil
 }
 
