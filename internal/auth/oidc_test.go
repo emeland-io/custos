@@ -47,6 +47,48 @@ func TestHandleLoginRedirectsWithPKCEAndSetsLoginCookie(t *testing.T) {
 	}
 }
 
+// TestHandleLoginReturnTo covers the return_to validation found in code
+// review to have an open-redirect hole: a leading "/\" resolves to a
+// different origin in a browser's URL parser the same way "//" does (new
+// URL("/\\evil.com", "https://custos.example.org/x").host is "evil.com"),
+// so handleLogin must reject it even though it is not literally "//"-
+// prefixed. Only a legitimate same-origin path should survive unchanged;
+// everything else falls back to "/".
+func TestHandleLoginReturnTo(t *testing.T) {
+	idp := newTestIDP(t)
+	cases := map[string]struct {
+		returnTo string
+		want     string // the Return claim handleLogin should have signed in
+	}{
+		"legitimate same-origin path": {"/w/123", "/w/123"},
+		"no return_to at all":         {"", "/"},
+		"double-slash open redirect":  {"//evil.com", "/"},
+		"leading backslash":           {"/\\evil.com", "/"}, // the open-redirect case from review
+		"backslash later in the path": {"/w/1\\2", "/"},
+		"absolute URL":                {"https://evil.com", "/"},
+	}
+	for name, tc := range cases {
+		m := newOIDCManager(t, idp)
+		target := "/auth/login"
+		if tc.returnTo != "" {
+			target += "?" + (url.Values{"return_to": {tc.returnTo}}).Encode()
+		}
+		rec := httptest.NewRecorder()
+		m.handleLogin(rec, httptest.NewRequest("GET", target, nil))
+		cookies := rec.Result().Cookies()
+		if len(cookies) != 1 {
+			t.Fatalf("%s: cookies %+v", name, cookies)
+		}
+		lc, err := m.verify(cookies[0].Value, "login")
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if lc.Return != tc.want {
+			t.Errorf("%s: return_to=%q got Return=%q, want %q", name, tc.returnTo, lc.Return, tc.want)
+		}
+	}
+}
+
 func TestHandleLoginTokenOnlyMode(t *testing.T) {
 	m := newManager(t) // Config.OIDC is nil
 	rec := httptest.NewRecorder()

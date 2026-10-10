@@ -65,8 +65,16 @@ func (m *Manager) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	state, nonce, verifier := randString(24), randString(24), oauth2.GenerateVerifier()
 	returnTo := "/"
-	if v := r.URL.Query().Get("return_to"); strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//") {
-		returnTo = v // "//host/.." would be an open redirect; everything else under "/" is the SPA's own routes
+	if v := r.URL.Query().Get("return_to"); strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//") && !strings.Contains(v, "\\") {
+		// "//host/.." is an open redirect a browser's URL parser resolves to
+		// a different origin; so is a leading "/\" — browsers treat "\" the
+		// same as "/" when resolving a URL, so "/\evil.com" against an
+		// https: base also resolves off-origin even though it does not
+		// start with "//" (found in code review). Rejecting any backslash
+		// anywhere in the value, not just a leading one, is deliberately
+		// broader than strictly necessary but keeps this check simple.
+		// Everything else under "/" is the SPA's own routes.
+		returnTo = v
 	}
 	m.setCookie(w, loginCookie, m.sign(claims{
 		Kind: "login", State: state, Nonce: nonce, Verifier: verifier, Issuer: m.issuer,
@@ -121,7 +129,7 @@ func (m *Manager) handleCallback(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusUnauthorized, fmt.Sprintf("invalid ID token: %v", err))
 		return
 	}
-	if idToken.Nonce != lc.Nonce {
+	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(lc.Nonce)) != 1 {
 		writeAuthError(w, http.StatusUnauthorized, "ID token nonce does not match the sign-in that was started")
 		return
 	}
