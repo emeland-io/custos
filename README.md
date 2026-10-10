@@ -159,11 +159,11 @@ Freeze a workspace when its documentation must not move, for example
 during an audit:
 
 ```sh
-A='X-Custos-Author: Jane Doe <jane@example.org>'
+A='Authorization: Bearer <token>'
 W=http://127.0.0.1:8080/api/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
 curl -X POST -H "$A" $W/freeze
-curl $W/pin-diff        # pinned catalog commit compared with catalog main
-curl $W/proposals       # open pin proposals and what each one changes
+curl -H "$A" $W/pin-diff        # pinned catalog commit compared with catalog main
+curl -H "$A" $W/proposals       # open pin proposals and what each one changes
 curl -X POST -H "$A" -H 'Content-Type: application/json' \
      -d '{"branch":"custos/pin/<catalog-commit>"}' $W/proposals/accept
 curl -X POST -H "$A" $W/unfreeze   # the pin moves to catalog main right away
@@ -180,8 +180,9 @@ curl -X POST -H "$A" $W/unfreeze   # the pin moves to catalog main right away
 
 `changes` lists `new_versions`, `added` and `superseded` tasks and tells
 whether groups (`groups_changed`) or processors and bindings
-(`bindings_changed`) differ. Write requests need the `X-Custos-Author`
-header.
+(`bindings_changed`) differ. `freeze`, `unfreeze` and the proposal
+endpoints need the engineer role for the workspace (see
+[Authentication](#authentication)).
 
 A proposal is a normal branch, so it can also be merged with Git: fetch
 it, merge it into `main` and push. custos reconciles the workspace right
@@ -202,8 +203,10 @@ custos workspace create --author "Jane Doe <jane@example.org>" WORKSPACE-UUID
                                                          # create a workspace pinned to the catalog
 custos serve [--data-dir DIR] [--addr ADDR] [--public-url URL]
                                                          # serve the repositories over HTTP
+custos token create --data-dir DIR --email E --name "Name" [--admin] [...]
+                                                         # bootstrap a user and print a personal access token
 custos clone URL DIR                                     # git clone, then download the attachments
-custos push [--dir DIR] [--author "NAME <EMAIL>"] [REMOTE [GIT-PUSH-ARGS...]]
+custos push [--dir DIR] [REMOTE [GIT-PUSH-ARGS...]]
                                                          # upload attachments, then git push
 custos processor test IMAGE --answer FILE [--previous DIR] [...]
                                                          # run a processor locally, print its proposal
@@ -235,8 +238,9 @@ git push http://127.0.0.1:8080/git/catalog.git main
 
 Repositories are served at `/git/catalog.git` and
 `/git/workspaces/<uuid>.git`; `GET /healthz` answers `ok` while the server
-runs. **There is no authentication yet**, so custos listens on
-`127.0.0.1:8080` by default.
+runs. Every other request below `/api/` and `/git/` needs a signed-in
+caller (see [Authentication](#authentication)); custos still listens on
+`127.0.0.1:8080` by default, since TLS is left to a reverse proxy.
 
 Push the catalog first; a workspace can only be created once the catalog
 has a `main` branch. Creating a workspace makes its first commit, a
@@ -269,12 +273,69 @@ example after an edit on disk, and serves them anyway.
 Flags win over environment variables. Run the built binary rather than
 `go run`: the repositories' hooks call the binary that started the server.
 
+## Authentication
+
+Every request below `/api/` and `/git/` needs a signed-in caller; `custos`
+has two ways to sign one in:
+
+- **OIDC.** Pass `--oidc-issuer-url`, `--oidc-client-id`,
+  `--oidc-client-secret` and `--oidc-redirect-url` (or their
+  `CUSTOS_OIDC_*` environment variables) to `custos serve`. A browser signs
+  in at `GET /auth/login` and gets a signed session cookie; `--admin-emails`
+  (comma-separated) grants the admin role to matching accounts the first
+  time they sign in. `--session-secret` (or `CUSTOS_SESSION_SECRET`) signs
+  the session and sign-in-state cookies; generate one with
+  `openssl rand -base64 32` and keep it stable across restarts, or every
+  session is invalidated.
+- **Personal access tokens**, for the CLI, CI and `git`/`curl`. Create one
+  with `custos token create`:
+
+  ```sh
+  custos token create --data-dir ./data --email jane@example.org \
+      --name "Jane Doe" --admin
+  ```
+
+  This prints the token once; it is not stored anywhere custos can show it
+  again. Role flags (`--admin`, `--task-author`, `--processor-author`,
+  `--engineer WORKSPACE-UUID,...`, or `--engineer '*'` for every workspace)
+  are additive: running the command again adds a role without dropping one
+  granted earlier. Revoke a role through `PUT /api/admin/users/{email}/roles`
+  (or by editing `<data-dir>/auth/users.json` directly), not by omitting a
+  flag.
+
+  Send the token as `Authorization: Bearer <token>`:
+
+  ```sh
+  curl -H 'Authorization: Bearer <token>' http://127.0.0.1:8080/api/workspaces
+  ```
+
+  For `git` and `custos clone`/`custos push`, put it in the remote URL's
+  userinfo instead (the password half; the username is ignored):
+
+  ```sh
+  git clone http://token:<token>@127.0.0.1:8080/git/catalog.git
+  ```
+
+  `custos push` and `custos clone` also read `$CUSTOS_TOKEN` for their own
+  attachment uploads and downloads (`POST /api/blobs`, `GET /api/blobs/…`);
+  when it is unset they fall back to the password half of the remote URL
+  above, so a plain `git clone`/`git push` URL with an embedded token is
+  enough on its own.
+
+Roles: **admin** (create and fork workspaces, manage users and roles),
+**task-author** and **processor-author** (catalog changes of the matching
+kind), and **engineer** (write access to a workspace's answers, scoped per
+workspace, or every workspace with `*`). Admin implies every other role
+everywhere. `GET /auth/me` reports the signed-in caller (`401` when there
+is none); `GET /auth/config` answers `{"oidc": bool}`, unauthenticated,
+so a client can tell "OIDC is configured" apart from "not yet signed in".
+
 ## REST API
 
 The server answers JSON below `/api`. Every request that changes something
-names its author in the header `X-Custos-Author: Name <email>`; that person
-becomes the author of the commit, `custos-bot` its committer. There is no
-authentication yet (see Running).
+is committed as authored by the signed-in caller, `custos-bot` its
+committer; every request, read or write, needs one (see
+[Authentication](#authentication)).
 
 | Method and path | Purpose |
 | --- | --- |
@@ -294,7 +355,7 @@ An answer is written for the task's current version unless `task_version`
 names another one. Markdown answers use `body`, all other types `value`:
 
 ```sh
-curl -X PUT -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+curl -X PUT -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{"value": "built by the release pipeline"}' \
   http://127.0.0.1:8080/api/workspaces/<workspace-uuid>/answers/<task-uuid>
@@ -306,10 +367,11 @@ Answers show `"available": false` for an attachment whose file the server
 does not have.
 
 Errors come as `{"error": "...", "problems": [{"path", "rule", "message"}]}`
-with 400 for a malformed request, 401 without a valid `X-Custos-Author`, 404
-for unknown workspaces, tasks and blobs, 409 when the workspace already
-exists or `main` moved meanwhile, 413 for oversized bodies, and 422 when the
-answer breaks a rule, the same rules as for a push.
+with 400 for a malformed request, 401 without a signed-in caller, 403 when
+the caller lacks the needed role, 404 for unknown workspaces, tasks and
+blobs, 409 when the workspace already exists or `main` moved meanwhile,
+413 for oversized bodies, and 422 when the answer breaks a rule, the same
+rules as for a push.
 
 ## Attachments, clone and push
 
@@ -343,9 +405,11 @@ custos push
 
 `custos push` uploads the attachments referenced in the commits the remote
 does not have yet, then runs `git push`. It pushes nothing when an attachment
-is neither in `.custos/blobs/sha256/` nor on the server. Uploads are made in
-the name of `--author`, `CUSTOS_AUTHOR`, or else the checkout's
-`user.name` and `user.email`.
+is neither in `.custos/blobs/sha256/` nor on the server. The upload
+authenticates with `$CUSTOS_TOKEN`, or, failing that, the password half of
+the remote URL's own userinfo (see [Authentication](#authentication));
+`git push` itself authenticates however the remote URL or your credential
+helper already does.
 
 ## Fork and merge
 
@@ -356,12 +420,13 @@ copied. Attachments live in one blob store shared by all workspaces, so
 nothing is copied there.
 
 ```sh
-curl -X POST -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+curl -X POST -H 'Authorization: Bearer <token>' \
   -d '{"id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"}' \
   http://127.0.0.1:8080/api/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9/fork
 ```
 
 Leave out `id` to get a generated one; the answer is `201 {"id": "…"}`.
+Forking needs the admin role.
 
 **Branches** of a workspace are for parallel or what-if work. Push any
 branch other than `main` with Git; only `main` is validated.
@@ -373,10 +438,10 @@ workspace:
 git push http://127.0.0.1:8080/git/workspaces/<original-id>.git main:from-fork
 ```
 
-**Merge** a branch into `main`:
+**Merge** a branch into `main` (needs the engineer role for the workspace):
 
 ```sh
-curl -X POST -H 'X-Custos-Author: Jane Doe <jane@example.org>' \
+curl -X POST -H 'Authorization: Bearer <token>' \
   -d '{"branch": "what-if"}' \
   http://127.0.0.1:8080/api/workspaces/<id>/merge
 ```
@@ -489,15 +554,15 @@ catalog task (`--max-generation-depth`), and output that would go deeper
 fails the run.
 
 ```sh
-A='X-Custos-Author: Jane Doe <jane@example.org>'
+A='Authorization: Bearer <token>'
 W=http://127.0.0.1:8080/api/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
-curl $W/processor-proposals                       # open proposals with their items
+curl -H "$A" $W/processor-proposals                       # open proposals with their items
 curl -X POST -H "$A" -H 'Content-Type: application/json' \
      -d '{"items": ["task:host:web-01", "document:inventory"]}' \
      $W/processor-proposals/<task-uuid>/accept      # leave out "items" to accept everything
 curl -X POST -H "$A" $W/processor-proposals/<task-uuid>/reject
-curl $W/runs                                      # run history, newest first
-curl $W/runs/<run-id>/log
+curl -H "$A" $W/runs                                      # run history, newest first
+curl -H "$A" $W/runs/<run-id>/log
 curl -X POST -H "$A" $W/runs/<run-id>/retry      # failed runs only
 ```
 
