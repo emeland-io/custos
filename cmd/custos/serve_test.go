@@ -2,9 +2,11 @@ package main
 
 import (
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/gittest"
@@ -34,9 +36,66 @@ func TestServeAddressInUse(t *testing.T) {
 	}
 	defer ln.Close()
 	code, out, errs := runCmd(t, "serve", "--data-dir", t.TempDir(), "--addr", ln.Addr().String())
-	if code != 1 || strings.Contains(out, "listening") || !strings.Contains(errs, "custos serve:") {
+	// The failure must specifically be the listener failing to bind
+	// (address already in use), not any other startup error swallowed
+	// under the same "custos serve:" prefix — such as openServer failing
+	// before ever trying to bind, which is what masked the DataDir bug
+	// this test exists to catch.
+	if code != 1 || strings.Contains(out, "listening") || !strings.Contains(errs, "custos serve:") || !strings.Contains(errs, "address already in use") {
 		t.Errorf("code %d out %q err %q", code, out, errs)
 	}
+}
+
+// TestServeStartsAndServesHealthz calls the real CLI entry point (run, the
+// same path os.Args[1:] takes) with a real --data-dir, the way an actual
+// "custos serve" invocation builds its auth.Config via authFlagSet.config
+// rather than constructing one by hand. It would have caught the bug where
+// authFlags.config never set authCfg.DataDir, which made every real
+// invocation fail at auth.NewManager ("auth: no data directory") before
+// ever binding its listener.
+func TestServeStartsAndServesHealthz(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	data := t.TempDir()
+	done := make(chan int, 1)
+	var out, errs lockedBuffer
+	go func() {
+		done <- run([]string{"serve", "--data-dir", data, "--addr", addr, "--public-url", "http://" + addr}, nil, &out, &errs)
+	}()
+
+	var resp *http.Response
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err = http.Get("http://" + addr + "/healthz")
+		if err == nil {
+			break
+		}
+		select {
+		case code := <-done:
+			t.Fatalf("serve exited early with code %d before /healthz answered, out %q err %q", code, out.String(), errs.String())
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("server never became reachable: %v (out %q err %q)", err, out.String(), errs.String())
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /healthz: %d", resp.StatusCode)
+	}
+
+	// runServe only stops on SIGINT/SIGTERM or an HTTP server error, and
+	// sending either from this test would reach the whole test binary, not
+	// just this goroutine's server. There is nothing left to assert once
+	// /healthz has answered, so leave it running; the test process exiting
+	// cleans it up.
+	_ = done
 }
 
 func TestServePublicURL(t *testing.T) {

@@ -170,6 +170,11 @@ func openServer(ctx context.Context, dataDir, publicURL string, procOpts process
 	if err != nil {
 		return nil, err
 	}
+	// authFlags.config builds authCfg without knowing dataDir (it has no
+	// --data-dir flag of its own; that flag lives in runServe), so fill it
+	// in here from openServer's own dataDir before auth.NewManager, which
+	// requires it.
+	authCfg.DataDir = dataDir
 	authMgr, err := auth.NewManager(authCfg)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
