@@ -168,3 +168,32 @@ func TestWorkspaceCreateAuthor(t *testing.T) {
 		t.Errorf("author %q", who)
 	}
 }
+
+func TestWorkspaceCreateFlagBeatsEnv(t *testing.T) {
+	data := t.TempDir()
+	seedCatalog(t, data)
+	t.Setenv("CUSTOS_DATA_DIR", t.TempDir()) // a different, empty data dir: the flag must win
+	t.Setenv("CUSTOS_AUTHOR", "Env Author <env@example.org>")
+	t.Setenv("CUSTOS_PUBLIC_URL", "https://env.example.org")
+	code, out, errs := runCmd(t, "workspace", "create", "--data-dir", data, "--author", "Flag Author <flag@example.org>",
+		"--public-url", "https://flag.example.org", fixture.WorkspaceID)
+	if code != 0 || !strings.Contains(out, "https://flag.example.org/git/workspaces/") {
+		t.Fatalf("code %d out %q err %q", code, out, errs)
+	}
+	dir := filepath.Join(data, "repos", "workspaces", fixture.WorkspaceID+".git")
+	if who := gittest.Run(t, dir, "log", "-1", "--format=%an", "main"); who != "Flag Author" {
+		t.Errorf("author %q", who)
+	}
+}
+
+func TestWorkspaceCreateIgnoresServerURL(t *testing.T) {
+	// ruling 5.5: --server-url / CUSTOS_SERVER_URL are not the public URL.
+	t.Setenv("CUSTOS_PUBLIC_URL", "")
+	t.Setenv("CUSTOS_SERVER_URL", "https://server.example.org")
+	data := t.TempDir()
+	seedCatalog(t, data)
+	_, out, _ := runCmd(t, "workspace", "create", "--data-dir", data, "--author", "Jane Doe <jane@example.org>", fixture.WorkspaceID)
+	if !strings.Contains(out, defaultPublicURL) || strings.Contains(out, "server.example.org") {
+		t.Errorf("out %q", out)
+	}
+}

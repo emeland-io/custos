@@ -39,7 +39,7 @@ var legacyCLI bool
 
 // portedCommands are the commands cobra serves. A command joins it in the
 // task that ports it.
-var portedCommands = map[string]bool{"config": true, "validate": true, "task": true}
+var portedCommands = map[string]bool{"config": true, "validate": true, "task": true, "workspace": true}
 
 // run executes one command and returns the process exit code: 0 on success,
 // 1 when the command failed, 2 when it was called incorrectly.
