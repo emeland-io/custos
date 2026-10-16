@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { authorRoutes } from './authors'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/w/:id/tasks/:taskId', name: 'answer', component: () => import('../views/engineer/AnswerView.vue') },
     { path: '/w/:id/proposals', name: 'proposals', component: () => import('../views/engineer/ProposalsView.vue') },
     { path: '/w/:id/book', name: 'book', component: () => import('../views/engineer/BookView.vue') },
+    ...authorRoutes,
   ],
 })
 

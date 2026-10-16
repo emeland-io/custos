@@ -30,11 +30,16 @@ const workspaceId = computed(() => (typeof route.params.id === 'string' ? route.
             Book
           </router-link>
         </RoleGate>
-        <!--
-          Extension point for plan 4d: RoleGate role="task-author" and
-          role="processor-author" sections linking into /catalog/drafts
-          and /processors go here.
-        -->
+        <RoleGate role="task-author">
+          <router-link to="/catalog/drafts" class="text-sm text-gray-600 hover:text-gray-900">
+            Catalog drafts
+          </router-link>
+        </RoleGate>
+        <RoleGate role="processor-author">
+          <router-link to="/processors" class="text-sm text-gray-600 hover:text-gray-900">
+            Processors
+          </router-link>
+        </RoleGate>
         <div class="ml-auto flex items-center gap-3 text-sm">
           <template v-if="auth.principal">
             <span class="text-gray-500">{{ auth.principal.name }}</span>
