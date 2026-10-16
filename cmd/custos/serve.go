@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/emeland-io/custos/internal/auth"
+	"github.com/emeland-io/custos/internal/catalogdraft"
 	"github.com/emeland-io/custos/internal/distribute"
 	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
@@ -191,7 +192,8 @@ func openServer(ctx context.Context, dataDir, publicURL string, procOpts process
 		svc.Scan(id) // a fork's main does not move through the store
 	}, rerunAfterMerge(svc, stderr))
 	srv := server.New(st)
-	startDistribution(st, a, srv, stderr)
+	reconcile := startDistribution(st, a, srv, stderr)
+	catalogdraft.Register(a, st, reconcile)
 	startRuns(ctx, st, a, srv, svc)
 	srv.WithAPI(a.Handler())
 	srv.WithAuth(a.Handler())

@@ -17,7 +17,13 @@ import (
 // now to catch up with commits made while the server was down (ruling 2.5).
 // Call it before a.Handler() and srv.Handler(). Failures are written to
 // stderr and never stop the server (spec §7).
-func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr io.Writer) {
+//
+// It returns the reconcile closure it wires to srv.OnCatalogPush, so a
+// caller can also wire it to catalogdraft.Register's onPublish: a draft
+// publish moves the catalog's main the same way a catalog git push does,
+// but does not go through a Git push itself, so it needs the same
+// reconciliation triggered explicitly (architecture note ruling 17).
+func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr io.Writer) func() {
 	distribute.Register(a, st)
 	reconcile := func() {
 		if err := distribute.Reconcile(st); err != nil {
@@ -31,4 +37,5 @@ func startDistribution(st *store.Store, a *api.API, srv *server.Server, stderr i
 		}
 	})
 	reconcile()
+	return reconcile
 }
