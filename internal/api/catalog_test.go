@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/emeland-io/custos/internal/catalog"
 	"github.com/emeland-io/custos/internal/fixture"
 	"github.com/emeland-io/custos/internal/task"
 )
@@ -71,4 +72,17 @@ func TestEmptyCatalog(t *testing.T) {
 		t.Errorf("empty catalog %+v", got)
 	}
 	decode[errorJSON](t, e.do(t, "GET", "/api/catalog/tasks/"+fixture.TaskA, "", ""), http.StatusNotFound)
+}
+
+func TestCatalogJSONExported(t *testing.T) {
+	// catalogToJSON dereferences c.Tasks unconditionally (it is always
+	// populated by catalog.Load); found while applying this plan to a
+	// scratch copy — the literal below needs a non-nil *task.Graph too,
+	// not just Groups, or CatalogJSON panics instead of returning a
+	// value. Add "github.com/emeland-io/custos/internal/task" to this
+	// test file's imports if not already present.
+	c := &catalog.Catalog{Groups: map[string]*catalog.Group{}, Tasks: &task.Graph{}}
+	if got := CatalogJSON(c, "deadbeef"); got == nil {
+		t.Fatal("CatalogJSON returned nil")
+	}
 }

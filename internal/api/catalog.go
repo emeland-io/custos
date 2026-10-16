@@ -92,6 +92,14 @@ func catalogToJSON(c *catalog.Catalog, commit string) catalogJSON {
 	return out
 }
 
+// CatalogJSON builds the same JSON shape GET /api/catalog returns, for a
+// catalog tree that is not necessarily the committed main — plan 4b's
+// draft-viewing endpoint (internal/catalogdraft) calls this so the frontend
+// can render a draft's catalog the same way it renders the read-only one.
+func CatalogJSON(c *catalog.Catalog, commit string) any {
+	return catalogToJSON(c, commit)
+}
+
 // groupToJSON converts a group and its sub-groups. seen guards against
 // cycles, which rule 5 already rejects on main.
 func groupToJSON(c *catalog.Catalog, slug string, seen map[string]bool) *groupJSON {
