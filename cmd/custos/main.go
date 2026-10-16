@@ -8,6 +8,7 @@ import (
 	"os"
 )
 
+// usage is the help text of runLegacy; cobra generates its own.
 const usage = `custos manages a task catalog and the workspaces that answer its tasks.
 
 Usage:
@@ -37,17 +38,13 @@ func main() {
 // both implementations agree. Delete it with runLegacy (ruling 5.10).
 var legacyCLI bool
 
-// portedCommands are the commands cobra serves. A command joins it in the
-// task that ports it.
-var portedCommands = map[string]bool{"config": true, "validate": true, "task": true, "workspace": true, "token": true, "clone": true, "push": true, "hook": true, "processor": true, "serve": true}
-
 // run executes one command and returns the process exit code: 0 on success,
 // 1 when the command failed, 2 when it was called incorrectly.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if !legacyCLI && len(args) > 0 && portedCommands[args[0]] {
-		return runCobra(args, stdin, stdout, stderr)
+	if legacyCLI {
+		return runLegacy(args, stdin, stdout, stderr)
 	}
-	return runLegacy(args, stdin, stdout, stderr)
+	return runCobra(args, stdin, stdout, stderr)
 }
 
 // runLegacy is the dispatcher that used the standard flag package.
