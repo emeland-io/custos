@@ -252,7 +252,7 @@ deserve a look first:
 | Ruling | What changes |
 | --- | --- |
 | 2.6 | Replaced: `X-Custos-Author` is gone; every write is authored by the signed-in caller (OIDC session or personal access token). |
-| 2.7 | The shared attachment store now has access control: reading or writing a workspace's attachments needs that workspace's engineer role (or admin). |
+| 2.7 | The shared attachment store now sits behind sign-in: `POST`/`GET /api/blobs` are gated only on the caller being signed in, not on any specific role (confirmed in the final re-review). |
 | 2.11 | HTML export now exists: `GET /api/workspaces/{id}/book?format=html`. |
 | 2.12 | The catalog API is no longer read-only: drafts, task/group/processor edits and publish now go through `internal/catalogdraft`. |
 | 4.6 | `--admin-emails` is checked fresh on every request, not cached at start-up — granting admin takes effect on that person's next request, not just at first sign-in. |
