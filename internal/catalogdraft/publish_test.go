@@ -165,3 +165,53 @@ func TestPublishImmutabilityViolation(t *testing.T) {
 		t.Errorf("Get after a rejected publish: %v", err)
 	}
 }
+
+// TestPublishFastForwardRejectsResolutions is a regression test for a code
+// review finding: the draft here rewrites the content of an already-
+// published task version (same immutability violation as
+// TestPublishImmutabilityViolation above) but, unlike that test, main has
+// not moved since the draft's Base, so Publish's edit closure takes the
+// fast-forward branch, which never runs planPublish or gitrepo.MergeTree at
+// all. Before the fix, a non-empty res was still passed through unchanged
+// as store.UpdateCatalog's allowImmutableChange, so naming the rewritten
+// path in res (with any Resolution, even one that doesn't correspond to a
+// real conflict) suppressed the immutability problem and the rewrite
+// landed on main. Publish must instead reject the call outright, because a
+// fast-forward has no conflict for res to resolve.
+func TestPublishFastForwardRejectsResolutions(t *testing.T) {
+	st := setup(t)
+	d, err := Create(st, alice, "Rewrite history, fast-forward")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := fixture.TaskPath(fixture.TaskA, "1.0.0")
+	rewritten := "---\nid: " + fixture.TaskA + "\nversion: 1.0.0\ntitle: Rewritten\nanswer_type: text\n---\n\nRewritten body.\n"
+	if _, err := Update(st, d.ID, alice, "rewrite", func(fs.FS) ([]gitrepo.Change, error) {
+		return []gitrepo.Change{{Path: existing, Data: []byte(rewritten)}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mainBefore := catalogMain(t, st)
+
+	// A spurious resolution naming the rewritten path: nothing conflicted
+	// at this path (there is no merge at all on the fast-forward branch),
+	// but a Side: SideTheirs resolution is exactly the shape that, before
+	// the fix, reached allowedPaths and suppressed CheckImmutable's
+	// problem on that path.
+	_, err = Publish(st, d.ID, alice, map[string]merge.Resolution{existing: {Side: merge.SideTheirs}})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	// Main did not move: the rewrite must not have landed.
+	if got := catalogMain(t, st); got != mainBefore {
+		t.Errorf("main = %s, want unchanged %s (fast-forward with a spurious res must not publish)", got, mainBefore)
+	}
+	data, ok, err := st.CatalogRepo().ReadFile(mainBefore, existing)
+	if err != nil || !ok || string(data) == rewritten {
+		t.Errorf("published content for %s was rewritten; immutability bypass not closed", existing)
+	}
+	// The draft is untouched by a rejected publish.
+	if _, err := Get(st, d.ID); err != nil {
+		t.Errorf("Get after a rejected publish: %v", err)
+	}
+}

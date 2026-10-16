@@ -72,6 +72,16 @@ func Publish(st *store.Store, id string, author gitrepo.Signature, res map[strin
 	// publish (found while applying this plan to a scratch copy, Part 2
 	// of cross-plan review: TestPublishConflict's own "resolved with
 	// theirs" step cannot succeed without it).
+	//
+	// This is only safe because every path in res is guaranteed, by the
+	// time this value is actually used below, to have been a genuine
+	// gitrepo.MergeTree conflict: the fast-forward branch inside the edit
+	// closure rejects any call with a non-empty res outright (nothing to
+	// resolve on that path), and planPublish itself rejects any res key
+	// that doesn't match a real mt.Conflicts entry. So allowedPaths can
+	// never smuggle an immutability exemption onto a path that did not
+	// actually conflict (code review finding on this task's first
+	// version, closed by the fast-forward check below).
 	allowedPaths := make([]string, 0, len(res))
 	for path := range res {
 		allowedPaths = append(allowedPaths, path)
@@ -100,10 +110,32 @@ func Publish(st *store.Store, id string, author gitrepo.Signature, res map[strin
 
 		var desired fs.FS
 		if ours == d.Base {
+			// A fast-forward has no conflicts to resolve, so a non-empty
+			// res here is always wrong — either stale (left over from a
+			// previous, now-superseded conflict) or an attempt to smuggle
+			// an allowImmutableChange exemption (see allowedPaths below)
+			// onto a path nothing actually conflicted on. Rejecting this
+			// outright, before diffFS ever runs, is what keeps
+			// allowedPaths safe to compute from res's raw keys below:
+			// every path it can ever name was a genuine merge conflict,
+			// because the only way past this check is to have no res at
+			// all. (Found by code review: without this, a caller could
+			// rewrite an already-published task version in a draft that
+			// is still a clean fast-forward and pass res naming that
+			// path to silently defeat CheckImmutable, even though
+			// nothing conflicted.)
+			if len(res) > 0 {
+				return nil, fmt.Errorf("%w: draft %s is a clean fast-forward; res must be empty (there is nothing to resolve)", ErrInvalid, id)
+			}
 			if desired, err = cat.TreeFS(draftTip); err != nil {
 				return nil, err
 			}
 		} else {
+			// cat.MergeTree, unlike internal/merge.Merge's use of it, never
+			// needs its own MergeBase/"shares no history" check first:
+			// every draft branch is created by Create from the catalog's
+			// own main (see draft.go), so ours and draftTip always share
+			// history, unlike internal/merge.Merge's arbitrary-branch case.
 			mt, err := cat.MergeTree(ours, draftTip)
 			if err != nil {
 				return nil, err
