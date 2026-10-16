@@ -136,6 +136,19 @@ func (a *API) getBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("format") == "html" {
+		// The book is rendered by goldmark with WithUnsafe() (ruling, spec
+		// §11.4), so an engineer's answer can embed raw HTML including
+		// <script>. The web UI loads this in a sandboxed iframe
+		// (sandbox="", BookView.vue) that already blocks script execution;
+		// these two headers are defense-in-depth for any other caller that
+		// might load this response directly (a bare browser navigation to
+		// this URL, or a future unsandboxed consumer). Content-Security-
+		// Policy: sandbox mirrors the iframe's restrictions at the HTTP
+		// layer, and X-Content-Type-Options: nosniff stops a browser from
+		// reinterpreting the body as something other than the declared
+		// Content-Type.
+		w.Header().Set("Content-Security-Policy", "sandbox")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write(status.RenderHTML(s))

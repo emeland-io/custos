@@ -137,6 +137,18 @@ async function toggleFreeze() {
     </div>
     <p v-if="warning" class="text-sm text-amber-700">{{ warning }}</p>
     <p v-if="errorMessage" class="text-sm text-red-600">{{ errorMessage }}</p>
-    <iframe :srcdoc="bookHtml" class="h-[80vh] w-full rounded border bg-white" title="Workspace book" />
+    <!--
+      sandbox="" (the empty-string form) applies the strictest iframe
+      sandbox: no script execution, no same-origin access (so a script that
+      somehow did run couldn't read sessionStorage or same-origin fetch()
+      the app's API), no form submission, no top-level navigation. Goldmark
+      renders this HTML with WithUnsafe() (ruling, §11.4), so an engineer's
+      answer can contain a raw <script> tag; without this attribute that
+      script would execute in custos's own origin and could call
+      PUT /api/admin/users/{email}/roles to self-promote to admin (see
+      ruling 4.23 in the design spec). sandbox="" still permits rendering
+      the markup visually, which is all this preview needs.
+    -->
+    <iframe :srcdoc="bookHtml" sandbox="" class="h-[80vh] w-full rounded border bg-white" title="Workspace book" />
   </div>
 </template>
