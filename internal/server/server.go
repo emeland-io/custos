@@ -38,6 +38,7 @@ var workspacePushPath = regexp.MustCompile(`^/git/workspaces/([^/]+?)(?:\.git)?/
 type Server struct {
 	st  *store.Store
 	api http.Handler // mounted at /api/ when set
+	ui  http.Handler // mounted at / when set
 
 	auth       http.Handler                    // mounted at /auth/ when set
 	middleware func(http.Handler) http.Handler // wraps the whole mux when set
@@ -55,6 +56,16 @@ func New(st *store.Store) *Server { return &Server{st: st} }
 // full path, including /api/. It returns s.
 func (s *Server) WithAPI(h http.Handler) *Server {
 	s.api = h
+	return s
+}
+
+// WithUI mounts h at "/" in the handler that Handler returns, so that any
+// request none of the more specific prefixes (/git/, /api/, /auth/,
+// /healthz) claims falls through to the embedded single-page application
+// (internal/webui.Handler()), which serves its own index.html for every
+// client-side route. It returns s.
+func (s *Server) WithUI(h http.Handler) *Server {
+	s.ui = h
 	return s
 }
 
@@ -169,6 +180,9 @@ func (s *Server) Handler() (http.Handler, error) {
 	}
 	if s.auth != nil {
 		mux.Handle("/auth/", s.auth)
+	}
+	if s.ui != nil {
+		mux.Handle("/", s.ui)
 	}
 	var h http.Handler = mux
 	if s.middleware != nil {

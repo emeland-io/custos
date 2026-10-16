@@ -372,3 +372,24 @@ func TestHealthz(t *testing.T) {
 		t.Errorf("%d %q", rec.Code, rec.Body.String())
 	}
 }
+
+func TestWithUIServesTheUIAtRoot(t *testing.T) {
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "ui: %s", r.URL.Path)
+	})
+	h, err := New(store.New(t.TempDir(), custosBin, "http://custos.test")).WithUI(ui).Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/w/some-workspace", nil))
+	if rec.Code != 200 || rec.Body.String() != "ui: /w/some-workspace" {
+		t.Errorf("%d %q", rec.Code, rec.Body.String())
+	}
+	// /healthz still takes priority over the catch-all UI mount.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
+	if rec.Code != 200 || rec.Body.String() != "ok\n" {
+		t.Errorf("%d %q, want /healthz unaffected by WithUI", rec.Code, rec.Body.String())
+	}
+}

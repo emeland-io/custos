@@ -21,10 +21,11 @@ import (
 	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
 	"github.com/emeland-io/custos/internal/store"
+	"github.com/emeland-io/custos/internal/webui"
 )
 
-// defaultAddr listens on loopback only by default; the operator may widen
-// it since every request now needs a signed-in caller or a valid token.
+// defaultAddr listens on loopback only, the conservative default for a
+// server that is not deliberately placed behind a reverse proxy.
 const defaultAddr = "127.0.0.1:8080"
 
 // defaultPublicURL is where clients reach a server on defaultAddr.
@@ -196,6 +197,11 @@ func openServer(ctx context.Context, dataDir, publicURL string, procOpts process
 	catalogdraft.Register(a, st, reconcile)
 	startRuns(ctx, st, a, srv, svc)
 	srv.WithAPI(a.Handler())
+	ui, err := webui.Handler()
+	if err != nil {
+		return nil, err
+	}
+	srv.WithUI(ui)
 	srv.WithAuth(a.Handler())
 	srv.WithMiddleware(authMgr.Middleware("/healthz", "/auth/login", "/auth/callback", "/"))
 	return srv, nil
