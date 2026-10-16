@@ -18,21 +18,79 @@ import (
 
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/store"
+	"github.com/emeland-io/custos/internal/task"
 )
 
-// catalogPushPaths are the requests that carry a push to the catalog: git
-// http-backend serves both the repository's real name and the alias
+// pushPathPattern recognises any POST request path under /git/ whose final
+// segment is git-receive-pack — that is, any attempted push, canonical
+// spelling or not — and captures the repository portion between "/git/"
+// and "/git-receive-pack" for canonicalPushTarget to classify. Capturing
+// broadly here, then requiring an exact match below, is what lets
+// pushGate/notifyPush default-deny anything canonicalPushTarget doesn't
+// recognise, instead of silently letting it through (see
+// canonicalPushTarget's comment).
+var pushPathPattern = regexp.MustCompile(`^/git/(.+)/git-receive-pack$`)
+
+// canonicalCatalogPushPaths are the only two byte-for-byte spellings of
+// the catalog's repository portion that canonicalPushTarget accepts: the
+// repository's real name and the alias git http-backend also serves
 // without ".git".
-var catalogPushPaths = [2]string{
-	"/git/catalog.git/git-receive-pack",
-	"/git/catalog/git-receive-pack",
+var canonicalCatalogPushPaths = [2]string{"catalog", "catalog.git"}
+
+// pushTarget identifies which repository a canonically-spelled push path
+// addresses.
+type pushTarget struct {
+	catalog     bool
+	workspaceID string // set, and catalog false, for a workspace push
 }
 
-// workspacePushPath matches the requests that carry a push to a workspace,
-// git http-backend serves both the repository's real name and the alias
-// without ".git", the same way it does for the catalog. The captured group
-// is the workspace id.
-var workspacePushPath = regexp.MustCompile(`^/git/workspaces/([^/]+?)(?:\.git)?/git-receive-pack$`)
+// canonicalPushTarget reports what repoPath — the portion pushPathPattern
+// captured between "/git/" and "/git-receive-pack" — addresses, and
+// whether that spelling is the exact canonical one.
+//
+// This is deliberately NOT a normalize-then-compare check (lower-case
+// repoPath and see if it matches a known name): the final whole-branch
+// re-review found that shape of fix is fundamentally incomplete, because
+// the real mismatch it has to close is between "what this code matches as
+// text" and "what the OS filesystem treats as the same path," and those
+// two can diverge in more ways than ASCII casing. The prior fix lower-cased
+// the path with strings.ToLower before comparing, which closed the ASCII
+// case-variant bypass (e.g. "/git/Catalog.git") but missed that
+// strings.ToLower does not perform full Unicode case-folding: a workspace
+// path spelled with the Unicode "long s" U+017F in place of an ASCII "s"
+// in "workspaces" (e.g. "/git/workſpaces/<id>.git") case-folds to the
+// exact same directory as "/git/workspaces/<id>.git" on a case-insensitive,
+// Unicode-normalizing filesystem (APFS, the macOS default) — but
+// strings.ToLower leaves U+017F alone, so the lower-cased path still
+// didn't match either known literal, fell through pushGate's switch with
+// neither case taken, and reached git http-backend with no role check at
+// all (reproduced live: a zero-role token was refused on the canonical
+// path but succeeded via the U+017F variant, and the workspace's main
+// actually advanced).
+//
+// Rather than chase that gap (and the next Unicode normalization or
+// filesystem quirk after it) with another folding rule, canonicalPushTarget
+// requires repoPath to already be written, byte-for-byte, in the one
+// canonical form each repository is addressed by. Anything else —
+// including a spelling the filesystem would still resolve to the very
+// same repository — reports ok=false, and pushGate/notifyPush treat that
+// as an unconditional reject: no role check, no fallthrough to git
+// http-backend, before either ever sees the request.
+func canonicalPushTarget(repoPath string) (target pushTarget, ok bool) {
+	if slices.Contains(canonicalCatalogPushPaths[:], repoPath) {
+		return pushTarget{catalog: true}, true
+	}
+	const workspacePrefix = "workspaces/"
+	rest, isWorkspace := strings.CutPrefix(repoPath, workspacePrefix)
+	if !isWorkspace {
+		return pushTarget{}, false
+	}
+	id := strings.TrimSuffix(rest, ".git")
+	if !task.ValidID(id) || (rest != id && rest != id+".git") {
+		return pushTarget{}, false
+	}
+	return pushTarget{workspaceID: id}, true
+}
 
 // Server serves the repositories of a store. Repository layout, hooks and
 // writes belong to the store (ruling 2.17).
@@ -219,32 +277,29 @@ func (s *Server) requireSignedIn(gitRealm bool, h http.Handler) http.Handler {
 // unaffected: requireSignedIn already covers it. The caller is always
 // present: pushGate only ever wraps requireSignedIn's h.
 //
-// Matching is done against a lower-cased copy of the path (gatePath, below),
-// not r.URL.Path itself: on a case-insensitive filesystem (the macOS/Windows
-// dev-server default) git http-backend's repository lookup folds case, so
-// "/git/Catalog.git/git-receive-pack" and "/git/catalog.GIT/git-receive-pack"
-// resolve to the exact same repository as the canonical path but would not
-// match catalogPushPaths/workspacePushPath's case-sensitive literals —
-// falling through to neither switch case and reaching the backend
-// ungated (ruling, spec §11.4). Folding the comparison, not r.URL.Path
-// itself, means the request is recognised as "the catalog" or "a workspace"
-// regardless of the casing used to spell it, and gated exactly as the
-// canonical-case path already is; the unmodified r.URL.Path still reaches
-// git http-backend unchanged.
+// Any POST whose path pushPathPattern recognises as an attempted push
+// (ends in /git-receive-pack) but whose repository portion
+// canonicalPushTarget does not accept as byte-for-byte canonical is
+// rejected outright, with no role check and no fallthrough to h — see
+// canonicalPushTarget's comment for why this default-deny shape replaced
+// the prior normalize-then-compare fix (spec §11.4).
 func (s *Server) pushGate(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			c, _ := api.CallerOf(r)
-			gatePath := strings.ToLower(r.URL.Path)
-			switch {
-			case slices.Contains(catalogPushPaths[:], gatePath):
-				if !c.Has("task-author", "") {
-					http.Error(w, "this push needs the task-author role", http.StatusForbidden)
+			if m := pushPathPattern.FindStringSubmatch(r.URL.Path); m != nil {
+				target, ok := canonicalPushTarget(m[1])
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
 					return
 				}
-			default:
-				if m := workspacePushPath.FindStringSubmatch(gatePath); m != nil && !c.Has("engineer", m[1]) {
-					http.Error(w, "this push needs the engineer role for workspace "+m[1], http.StatusForbidden)
+				c, _ := api.CallerOf(r)
+				if target.catalog {
+					if !c.Has("task-author", "") {
+						http.Error(w, "this push needs the task-author role", http.StatusForbidden)
+						return
+					}
+				} else if !c.Has("engineer", target.workspaceID) {
+					http.Error(w, "this push needs the engineer role for workspace "+target.workspaceID, http.StatusForbidden)
 					return
 				}
 			}
@@ -255,19 +310,25 @@ func (s *Server) pushGate(h http.Handler) http.Handler {
 
 // notifyPush wraps h so that, once it has served the request, a push to the
 // catalog fires every OnCatalogPush callback and a push to a workspace fires
-// every OnWorkspacePush callback with that workspace's id. Matching is
-// case-folded the same way pushGate's is (see its comment): a push that
-// pushGate recognised and allowed through a non-canonical-case path must
-// still trigger reconciliation, or the pin/proposal machinery silently
-// falls out of sync with a workspace or catalog that actually moved.
+// every OnWorkspacePush callback with that workspace's id. It uses the same
+// canonicalPushTarget classification pushGate does, so a path pushGate
+// already rejected (not canonical) never reaches here having done
+// anything worth reconciling: the request never reached h either.
 func (s *Server) notifyPush(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
 		if r.Method != http.MethodPost {
 			return
 		}
-		notifyPath := strings.ToLower(r.URL.Path)
-		if slices.Contains(catalogPushPaths[:], notifyPath) {
+		m := pushPathPattern.FindStringSubmatch(r.URL.Path)
+		if m == nil {
+			return
+		}
+		target, ok := canonicalPushTarget(m[1])
+		if !ok {
+			return
+		}
+		if target.catalog {
 			s.mu.Lock()
 			fs := append([]func(){}, s.onCatalogPush...)
 			s.mu.Unlock()
@@ -276,14 +337,12 @@ func (s *Server) notifyPush(h http.Handler) http.Handler {
 			}
 			return
 		}
-		if m := workspacePushPath.FindStringSubmatch(notifyPath); m != nil {
-			id := m[1]
-			s.mu.Lock()
-			fs := append([]func(string){}, s.onWorkspacePush...)
-			s.mu.Unlock()
-			for _, f := range fs {
-				f(id)
-			}
+		id := target.workspaceID
+		s.mu.Lock()
+		fs := append([]func(string){}, s.onWorkspacePush...)
+		s.mu.Unlock()
+		for _, f := range fs {
+			f(id)
 		}
 	})
 }

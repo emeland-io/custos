@@ -164,13 +164,15 @@ func TestPushNeedsRole(t *testing.T) {
 // finding: on a case-insensitive filesystem (macOS/Windows, the dev-server
 // default) git http-backend's own repository lookup folds case, so
 // "/git/Catalog.git" and "/git/catalog.GIT" resolve to the very same
-// repository as "/git/catalog.git" — but pushGate's catalogPushPaths and
-// workspacePushPath matching used to be case-sensitive, so neither
-// case-variant path matched either switch case in pushGate and the
-// request reached git http-backend with no role check at all. Reproduced
-// live (pre-fix): a read-only token's push to "/git/Catalog.git" went
-// through and catalog main advanced. The fix folds the match to
-// lower-case before comparing; this test pushes the same case variants a
+// repository as "/git/catalog.git" — but pushGate's matching used to be
+// case-sensitive, so neither case-variant path matched and the request
+// reached git http-backend with no role check at all. Reproduced live
+// (pre-fix): a read-only token's push to "/git/Catalog.git" went through
+// and catalog main advanced. The original fix folded the match to
+// lower-case before comparing; that in turn proved incomplete for
+// Unicode (see TestPushRejectsUnicodeCaseFoldVariant and
+// canonicalPushTarget's comment) and was replaced by today's default-deny
+// canonicalPushTarget. This test pushes the same ASCII case variants a
 // read-only caller used to get through with and checks they are refused
 // exactly like the canonical-case path already was.
 func TestPushNeedsRoleCaseInsensitivePath(t *testing.T) {
@@ -207,6 +209,63 @@ func TestPushNeedsRoleCaseInsensitivePath(t *testing.T) {
 		if out, err := gittest.Try(wsDir, "push", authedURL(t, baseURL+variant, taskAuthor), "main"); err == nil {
 			t.Fatalf("task-author (not engineer here) pushed the workspace via %s:\n%s", variant, out)
 		}
+	}
+}
+
+// TestPushRejectsUnicodeCaseFoldVariant is the re-review's finding on top
+// of TestPushNeedsRoleCaseInsensitivePath: strings.ToLower only performs
+// simple case mapping, not full Unicode case-folding, so a path spelled
+// with the Unicode "long s" (U+017F, "ſ") in place of the ASCII "s" in
+// "workspaces" was NOT recognised as a case variant of
+// "/git/workspaces/<id>.git" by the prior fix's lower-cased comparison —
+// even though a case-insensitive, Unicode-normalizing filesystem (APFS,
+// the macOS default) resolves both spellings to the exact same repository
+// directory on disk. Because pushGate's switch fell through neither case
+// for that spelling, the request reached git http-backend with NO role
+// check at all. Reproduced live (pre-fix): a token with zero roles was
+// correctly refused on the canonical path but succeeded via the "ſ"
+// variant, and the workspace's main actually advanced; notifyPush missed
+// it too, so reconciliation never fired either.
+//
+// The fix (see canonicalPushTarget's comment) replaces normalize-then-
+// compare with default-deny: the repository-name segment must already be
+// byte-for-byte canonical, so this variant — which never matches any
+// accepted spelling, canonicalized or not — is rejected outright, before
+// the role check (which the zero-role caller below would fail anyway) or
+// git http-backend ever runs.
+func TestPushRejectsUnicodeCaseFoldVariant(t *testing.T) {
+	st, m, baseURL := startAuthed(t)
+	zeroRole := bootstrapToken(t, m, "zero@example.org", auth.Roles{})
+	taskAuthor := bootstrapToken(t, m, "ta3@example.org", auth.Roles{TaskAuthor: true})
+	engineer := bootstrapToken(t, m, "eng3@example.org", auth.Roles{Engineer: []string{fixture.WorkspaceID}})
+
+	// A workspace needs the catalog to already have a main branch, the
+	// same prerequisite TestPushNeedsRole sets up.
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+	gittest.Run(t, work, "push", authedURL(t, baseURL+"/git/catalog.git", taskAuthor), "main")
+
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	wsDir := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", authedURL(t, baseURL+"/git/workspaces/"+fixture.WorkspaceID+".git", engineer), wsDir)
+	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: x\n---\n"})
+
+	repoDir := filepath.Join(st.DataDir(), "repos", "workspaces", fixture.WorkspaceID+".git")
+	before := gittest.Run(t, repoDir, "rev-parse", "main")
+
+	// The repository-name segment below is "work\u017fpaces", not
+	// "workspaces": U+017F ("ſ"), LATIN SMALL LETTER LONG S, stands in for
+	// the ASCII "s". authedURL's url.Parse/String round trip percent-encodes
+	// it exactly as the live finding's request did (%C5%BF).
+	variant := "/git/work\u017fpaces/" + fixture.WorkspaceID + ".git"
+	if out, err := gittest.Try(wsDir, "push", authedURL(t, baseURL+variant, zeroRole), "main"); err == nil {
+		t.Fatalf("zero-role caller pushed the workspace via the Unicode long-s variant %s:\n%s", variant, out)
+	}
+
+	if after := gittest.Run(t, repoDir, "rev-parse", "main"); after != before {
+		t.Fatalf("workspace main advanced via the rejected push: before %s, after %s", before, after)
 	}
 }
 
