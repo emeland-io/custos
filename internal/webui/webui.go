@@ -31,6 +31,16 @@ func Handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	return handlerFor(sub), nil
+}
+
+// handlerFor builds the handler's serving logic over an arbitrary fs.FS
+// rooted at the SPA's dist directory. It is split out from Handler so
+// tests can exercise it against a lightweight directory tree (e.g. an
+// fstest.MapFS with a real, non-index asset in it) instead of only the
+// real embedded dist/, which — per ruling 4.2 — commits nothing but
+// index.html and .gitkeep.
+func handlerFor(sub fs.FS) http.Handler {
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// path.Clean("/") is "/", and TrimPrefix(..., "/") of that is ""
@@ -43,6 +53,22 @@ func Handler() (http.Handler, error) {
 		if p == "" || p == "." {
 			p = "index.html"
 		}
+		// A request that resolves to index.html itself — whether because
+		// it's the root above, or because the request literally asked for
+		// /index.html — must never fall through to files.ServeHTTP:
+		// http.FileServer's serveFile 301-redirects any request path
+		// ending in "/index.html" to its parent directory ("./"), so a
+		// direct link, bookmark, or health check hitting /index.html got a
+		// wasted redirect instead of the page. Found in review: the first
+		// fix only routed the SPA-fallback branch (an unknown path
+		// synthesizing index.html) around FileServer, not this direct-hit
+		// case. Every route that should render the SPA shell — root,
+		// fallback, and a direct /index.html request — goes through
+		// serveIndex; only real, named asset files ever reach FileServer.
+		if p == "index.html" {
+			serveIndex(w, r, sub)
+			return
+		}
 		if _, err := fs.Stat(sub, p); err != nil {
 			if strings.Contains(path.Base(p), ".") {
 				http.NotFound(w, r)
@@ -52,7 +78,7 @@ func Handler() (http.Handler, error) {
 			return
 		}
 		files.ServeHTTP(w, r)
-	}), nil
+	})
 }
 
 // serveIndex writes dist/index.html directly, rather than routing a
