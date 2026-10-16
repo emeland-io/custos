@@ -273,9 +273,9 @@ to `main` — and ready for the finishing step.
 ## Phase 5 — cobra/viper command line
 
 - Plan: [2026-10-16-cobra-viper-cli.md](2026-10-16-cobra-viper-cli.md), 13 tasks.
-- Executed with subagent-driven development on branch `worktree-phase-5-cobra-viper`: one implementer and one reviewer per task. Final whole-branch review pending.
+- Executed with subagent-driven development on branch `worktree-phase-5-cobra-viper`: one implementer and one reviewer per task. The final whole-branch review (most capable model, 4436c75..3491f33) found no Critical issues. Three Important and four Minor findings were fixed in one fix wave: the completion command disabled and ruling 5.16 added, the nil-args seam in `runCobra`, the phases-file status, `config get` validating the URL, the `CheckURL` host check, the `push` usage line, and the wording of ruling 5.15. A scoped re-review followed.
 - Status: all 13 tasks implemented. Done, not yet merged to `main`.
-- Rulings: spec §11.5 (5.1–5.10 from planning, 5.11–5.15 made while executing).
+- Rulings: spec §11.5 (5.1–5.10 from planning, 5.11–5.16 made while executing).
 
 The tasks:
 
@@ -295,7 +295,7 @@ The tasks:
 
 Two tasks needed a fix round: Task 9 (the hook port had no success- or rejection-path test, ruling 5.12) and Task 11 (the serve precedence test bound a privileged port and could hang as root, ruling 5.15).
 
-Verified: `make test` passed at the cut-over commit `b64a330` (Go vet, race tests, the `cmd/custos` tests against both the cobra and the old dispatcher, both SDKs, the web type check).
+Verified: `make test` passed at the cut-over commit `b64a330` (Go vet, race tests, the `cmd/custos` tests against both the cobra and the old dispatcher, both SDKs, the web type check). `make test` passed again after the final fix wave (exit 0, same steps).
 
 The three deliberate behavior changes (ruling 5.7):
 
@@ -307,10 +307,13 @@ Left for later:
 
 - Delete the old dispatcher and its helpers (ruling 5.10a): `runLegacy`, `legacyCLI`, `legacy_hook_test.go`, the legacy `runX` parsing wrappers, `envOr`/`envInt`, the Makefile's second test run. Then update the comments that mention it (`errs += out` in the serve tests).
 - `custos clone` by name, resolved against `server-url` (ruling 5.10b); decide then whether `workspace create` defaults `--public-url` from it (rejected for now, ruling 5.5).
-- `config.Set`: no `Sync` before the rename; `MkdirAll` does not tighten an existing, looser directory; rewriting the file drops YAML comments. `CheckURL` accepts an empty hostname (`https://:80`), and `config get` prints a `--server-url` flag value without checking it.
+- `config.Set`: no `Sync` before the rename; `MkdirAll` does not tighten an existing, looser directory; rewriting the file drops YAML comments.
 - No test for `run()`'s routing (unported commands to the old dispatcher, `legacyCLI` forcing it); `TestEveryCommandIsListed` uses loose `strings.Contains`. `hook` is unlisted on purpose.
 - Several tests guard against regressions rather than pin behavior: `TestWorkspaceCreateIgnoresServerURL` only exercises the environment and discards the exit code; the stray-environment and `TestTokenCreateDataDirFromEnvironment` tests assert little; `TestConfigUsage`, `TestValidateTooManyArguments` and the broken-config tests check exit codes or non-empty output, not the text.
-- `push`: the `Use` string does not say flags after REMOTE go to git, and the nil-versus-empty `DeepEqual` pin is brittle.
+- `push`: the nil-versus-empty `DeepEqual` pin is brittle.
 - Hook tests cover only `--kind catalog`; dropping the `--kind` or `--workspace` flags would not be caught.
 - `processor test`: the container-runtime test relies on the runner's error echoing the path and does not test the default `docker`; the bare `processor` usage path has no direct test.
 - Comment nit: the parent `task` command's `ArbitraryArgs` has no explanatory comment.
+
+Phase 5 is complete on branch `worktree-phase-5-cobra-viper` — not yet merged
+to `main` — and ready for the finishing step.
