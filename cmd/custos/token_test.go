@@ -114,3 +114,37 @@ func TestTokenCreateAddsToExistingRoles(t *testing.T) {
 		t.Errorf("roles %+v, want both grants kept", u.Roles)
 	}
 }
+
+// Ruling 5.4: only the allowlisted variables are read. A stray
+// CUSTOS_ADMIN or CUSTOS_EMAIL in someone's environment changes nothing.
+func TestTokenCreateIgnoresStrayEnvironment(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("CUSTOS_ADMIN", "true")
+	t.Setenv("CUSTOS_EMAIL", "env@example.org")
+	t.Setenv("CUSTOS_NAME", "Env")
+	if code, _, errs := runCmd(t, "token", "create", "--data-dir", data); code != 2 || !strings.Contains(errs, "usage: custos token create") {
+		t.Fatalf("CUSTOS_EMAIL must not supply --email: code %d err %q", code, errs)
+	}
+	if code, _, errs := runCmd(t, "token", "create", "--data-dir", data, "--email", "jane@example.org"); code != 0 {
+		t.Fatalf("code %d err %q", code, errs)
+	}
+	m, err := auth.NewManager(auth.Config{DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := m.UpdateUser("jane@example.org", func(*auth.User) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Roles.Admin || u.Name == "Env" {
+		t.Errorf("a stray environment variable took effect: %+v", u)
+	}
+}
+
+func TestTokenCreateDataDirFromEnvironment(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("CUSTOS_DATA_DIR", data)
+	if code, out, errs := runCmd(t, "token", "create", "--email", "jane@example.org"); code != 0 || strings.TrimSpace(out) == "" {
+		t.Fatalf("code %d out %q err %q", code, out, errs)
+	}
+}
