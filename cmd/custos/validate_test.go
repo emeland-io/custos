@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,5 +93,19 @@ func TestValidateStagedWorkspace(t *testing.T) {
 func TestValidateTooManyArguments(t *testing.T) {
 	if code, _, _ := runCmd(t, "validate", "a", "b"); code != 2 {
 		t.Errorf("code %d", code)
+	}
+}
+
+func TestValidateIgnoresABrokenConfigFile(t *testing.T) {
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "custos"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfgDir) // $XDG_CONFIG_HOME/custos/config.yaml cannot exist
+	t.Setenv("HOME", cfgDir)
+	dir := t.TempDir()
+	fixture.WriteDir(t, dir, fixture.Catalog())
+	if code, out, errs := runCmd(t, "validate", dir); code != 0 || out != "ok\n" {
+		t.Fatalf("code %d out %q err %q", code, out, errs)
 	}
 }

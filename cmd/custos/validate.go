@@ -15,26 +15,36 @@ import (
 	"github.com/emeland-io/custos/internal/gitrepo"
 	"github.com/emeland-io/custos/internal/problem"
 	"github.com/emeland-io/custos/internal/workspace"
+	"github.com/spf13/cobra"
 )
 
-// runValidate checks a catalog or workspace checkout: the staged content
-// when DIR is the root of a git work tree, the files on disk otherwise.
-// Content holding custos.yaml is a workspace; anything else is a catalog.
+const validateUsage = "usage: custos validate [--against REV] [DIR]\n"
+
+// runValidate parses the flags of validate with the pre-cobra dispatcher.
 func runValidate(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("validate", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	against := fl.String("against", "", "also check that the task versions in this git revision are unchanged (catalogs only; DIR must be the repository root)")
+	against := fl.String("against", "", validateAgainstHelp)
 	if err := fl.Parse(args); err != nil {
 		return helpOrUsage(err)
 	}
 	if fl.NArg() > 1 {
-		fmt.Fprintln(stderr, "usage: custos validate [--against REV] [DIR]")
+		fmt.Fprint(stderr, validateUsage)
 		return 2
 	}
 	dir := "."
 	if fl.NArg() == 1 {
 		dir = fl.Arg(0)
 	}
+	return doValidate(*against, dir, stdout, stderr)
+}
+
+const validateAgainstHelp = "also check that the task versions in this git revision are unchanged (catalogs only; DIR must be the repository root)"
+
+// doValidate checks a catalog or workspace checkout: the staged content
+// when dir is the root of a git work tree, the files on disk otherwise.
+// Content holding custos.yaml is a workspace; anything else is a catalog.
+func doValidate(against, dir string, stdout, stderr io.Writer) int {
 	fsys, err := filesToValidate(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos validate: %v\n", err)
@@ -42,15 +52,15 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	var ps []problem.Problem
 	if _, err := fs.Stat(fsys, "custos.yaml"); err == nil {
-		if *against != "" {
+		if against != "" {
 			fmt.Fprintln(stderr, "custos validate: --against only applies to catalogs")
 			return 2
 		}
 		ps = workspace.Check(fsys)
 	} else {
 		ps = catalog.Check(fsys)
-		if *against != "" {
-			old, err := (&gitrepo.Repo{Dir: dir}).TreeFS(*against)
+		if against != "" {
+			old, err := (&gitrepo.Repo{Dir: dir}).TreeFS(against)
 			if err != nil {
 				fmt.Fprintf(stderr, "custos validate: %v\n", err)
 				return 1
@@ -105,4 +115,27 @@ func helpOrUsage(err error) int {
 		return 0
 	}
 	return 2
+}
+
+func (c *cli) validateCmd() *cobra.Command {
+	var against string
+	cmd := &cobra.Command{
+		Use:   "validate [flags] [DIR]",
+		Short: "check a catalog or workspace checkout",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return usageError(validateUsage)
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			return result(doValidate(against, dir, c.stdout, c.stderr))
+		},
+	}
+	cmd.Flags().StringVar(&against, "against", "", validateAgainstHelp)
+	return cmd
 }

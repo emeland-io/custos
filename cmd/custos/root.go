@@ -71,7 +71,7 @@ func newRootCmd(c *cli) *cobra.Command {
 	root.PersistentFlags().StringVar(&c.configPath, "config", "", "personal config file (default ~/.config/custos/config.yaml)")
 	root.PersistentFlags().String("server-url", "", "URL of the custos server, for the commands that talk to one (env CUSTOS_SERVER_URL; today only \"config get\" reads it)")
 	// Commands are added here, one line each, in the task that ports them.
-	root.AddCommand(c.configCmd())
+	root.AddCommand(c.configCmd(), c.validateCmd())
 	return root
 }
 
