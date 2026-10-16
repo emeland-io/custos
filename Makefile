@@ -13,10 +13,11 @@ web-build:
 	cd web && npm ci && npm run build
 	rm -rf internal/webui/dist && cp -r web/dist internal/webui/dist
 
-## test: vet and run all tests, including both SDKs and the frontend type check (needs git, docker, python3 and node/npm on PATH)
+## test: vet and run all tests, including both SDKs and the frontend type check (needs git, docker, python3 and node/npm on PATH); the cmd/custos tests also run against the pre-cobra dispatcher
 test: web-typecheck
 	go vet ./...
 	go test ./... -race -count=1
+	CUSTOS_TEST_LEGACY_CLI=1 go test ./cmd/custos -race -count=1
 	cd sdk/go && go vet ./... && go test ./...
 	python3 -m unittest discover -s sdk/python
 
