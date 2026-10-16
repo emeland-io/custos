@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/emeland-io/custos/internal/api"
@@ -217,18 +218,32 @@ func (s *Server) requireSignedIn(gitRealm bool, h http.Handler) http.Handler {
 // body. Reading (info/refs, upload-pack) is not matched here, so it is
 // unaffected: requireSignedIn already covers it. The caller is always
 // present: pushGate only ever wraps requireSignedIn's h.
+//
+// Matching is done against a lower-cased copy of the path (gatePath, below),
+// not r.URL.Path itself: on a case-insensitive filesystem (the macOS/Windows
+// dev-server default) git http-backend's repository lookup folds case, so
+// "/git/Catalog.git/git-receive-pack" and "/git/catalog.GIT/git-receive-pack"
+// resolve to the exact same repository as the canonical path but would not
+// match catalogPushPaths/workspacePushPath's case-sensitive literals —
+// falling through to neither switch case and reaching the backend
+// ungated (ruling, spec §11.4). Folding the comparison, not r.URL.Path
+// itself, means the request is recognised as "the catalog" or "a workspace"
+// regardless of the casing used to spell it, and gated exactly as the
+// canonical-case path already is; the unmodified r.URL.Path still reaches
+// git http-backend unchanged.
 func (s *Server) pushGate(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			c, _ := api.CallerOf(r)
+			gatePath := strings.ToLower(r.URL.Path)
 			switch {
-			case slices.Contains(catalogPushPaths[:], r.URL.Path):
+			case slices.Contains(catalogPushPaths[:], gatePath):
 				if !c.Has("task-author", "") {
 					http.Error(w, "this push needs the task-author role", http.StatusForbidden)
 					return
 				}
 			default:
-				if m := workspacePushPath.FindStringSubmatch(r.URL.Path); m != nil && !c.Has("engineer", m[1]) {
+				if m := workspacePushPath.FindStringSubmatch(gatePath); m != nil && !c.Has("engineer", m[1]) {
 					http.Error(w, "this push needs the engineer role for workspace "+m[1], http.StatusForbidden)
 					return
 				}
@@ -240,14 +255,19 @@ func (s *Server) pushGate(h http.Handler) http.Handler {
 
 // notifyPush wraps h so that, once it has served the request, a push to the
 // catalog fires every OnCatalogPush callback and a push to a workspace fires
-// every OnWorkspacePush callback with that workspace's id.
+// every OnWorkspacePush callback with that workspace's id. Matching is
+// case-folded the same way pushGate's is (see its comment): a push that
+// pushGate recognised and allowed through a non-canonical-case path must
+// still trigger reconciliation, or the pin/proposal machinery silently
+// falls out of sync with a workspace or catalog that actually moved.
 func (s *Server) notifyPush(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
 		if r.Method != http.MethodPost {
 			return
 		}
-		if slices.Contains(catalogPushPaths[:], r.URL.Path) {
+		notifyPath := strings.ToLower(r.URL.Path)
+		if slices.Contains(catalogPushPaths[:], notifyPath) {
 			s.mu.Lock()
 			fs := append([]func(){}, s.onCatalogPush...)
 			s.mu.Unlock()
@@ -256,7 +276,7 @@ func (s *Server) notifyPush(h http.Handler) http.Handler {
 			}
 			return
 		}
-		if m := workspacePushPath.FindStringSubmatch(r.URL.Path); m != nil {
+		if m := workspacePushPath.FindStringSubmatch(notifyPath); m != nil {
 			id := m[1]
 			s.mu.Lock()
 			fs := append([]func(string){}, s.onWorkspacePush...)

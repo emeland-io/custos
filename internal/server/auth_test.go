@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/emeland-io/custos/internal/api"
@@ -156,6 +157,56 @@ func TestPushNeedsRole(t *testing.T) {
 	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: y\n---\n"})
 	if out, err := gittest.Try(wsDir, "push", authedURL(t, baseURL+"/git/workspaces/"+fixture.WorkspaceID+".git", taskAuthor), "main"); err == nil {
 		t.Fatalf("task-author (not engineer here) pushed the workspace:\n%s", out)
+	}
+}
+
+// TestPushNeedsRoleCaseInsensitivePath is the final whole-branch review's
+// finding: on a case-insensitive filesystem (macOS/Windows, the dev-server
+// default) git http-backend's own repository lookup folds case, so
+// "/git/Catalog.git" and "/git/catalog.GIT" resolve to the very same
+// repository as "/git/catalog.git" — but pushGate's catalogPushPaths and
+// workspacePushPath matching used to be case-sensitive, so neither
+// case-variant path matched either switch case in pushGate and the
+// request reached git http-backend with no role check at all. Reproduced
+// live (pre-fix): a read-only token's push to "/git/Catalog.git" went
+// through and catalog main advanced. The fix folds the match to
+// lower-case before comparing; this test pushes the same case variants a
+// read-only caller used to get through with and checks they are refused
+// exactly like the canonical-case path already was.
+func TestPushNeedsRoleCaseInsensitivePath(t *testing.T) {
+	st, m, baseURL := startAuthed(t)
+	readOnly := bootstrapToken(t, m, "ro2@example.org", auth.Roles{})
+	taskAuthor := bootstrapToken(t, m, "ta2@example.org", auth.Roles{TaskAuthor: true})
+	engineer := bootstrapToken(t, m, "eng2@example.org", auth.Roles{Engineer: []string{fixture.WorkspaceID}})
+
+	work := gittest.Init(t)
+	gittest.Commit(t, work, fixture.Catalog())
+
+	for _, variant := range []string{"/git/Catalog.git", "/git/catalog.GIT", "/git/CATALOG"} {
+		if out, err := gittest.Try(work, "push", authedURL(t, baseURL+variant, readOnly), "main"); err == nil {
+			t.Fatalf("read-only caller pushed the catalog via %s:\n%s", variant, out)
+		}
+	}
+	// The canonical path still works for the role that actually has it,
+	// proving the fix didn't just block everything.
+	gittest.Run(t, work, "push", authedURL(t, baseURL+"/git/catalog.git", taskAuthor), "main")
+
+	if err := st.CreateWorkspace(fixture.WorkspaceID, jane); err != nil {
+		t.Fatal(err)
+	}
+	wsDir := filepath.Join(t.TempDir(), "ws")
+	gittest.Run(t, t.TempDir(), "clone", authedURL(t, baseURL+"/git/workspaces/"+fixture.WorkspaceID+".git", engineer), wsDir)
+	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: x\n---\n"})
+	gittest.Run(t, wsDir, "push", "origin", "main") // origin already carries eng's token, from clone
+
+	gittest.Commit(t, wsDir, map[string]string{"answers/" + fixture.TaskA + ".md": "---\ntask: " + fixture.TaskA + "\ntask_version: 1.0.0\ntype: text\nvalue: y\n---\n"})
+	for _, variant := range []string{
+		"/git/Workspaces/" + fixture.WorkspaceID + ".git",
+		"/git/workspaces/" + strings.ToUpper(fixture.WorkspaceID) + ".git",
+	} {
+		if out, err := gittest.Try(wsDir, "push", authedURL(t, baseURL+variant, taskAuthor), "main"); err == nil {
+			t.Fatalf("task-author (not engineer here) pushed the workspace via %s:\n%s", variant, out)
+		}
 	}
 }
 
