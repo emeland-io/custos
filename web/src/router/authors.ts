@@ -48,5 +48,10 @@ export const authorRoutes: RouteRecordRaw[] = [
     name: 'catalog-draft-task',
     component: () => import('../views/taskauthor/TaskEditorView.vue'),
   },
+  {
+    path: '/processors',
+    name: 'processors',
+    component: () => import('../views/processorauthor/RegistryView.vue'),
+  },
   // plan 4d: later tasks insert their routes above this line
 ]
