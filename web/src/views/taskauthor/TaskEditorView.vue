@@ -4,6 +4,7 @@ import { RouterLink, onBeforeRouteLeave, useRoute } from 'vue-router'
 import MarkdownView from '../../components/MarkdownView.vue'
 import ProblemList from '../../components/ProblemList.vue'
 import LineDiff from './LineDiff.vue'
+import VersionGraphView from './VersionGraphView.vue'
 import { bumpVersion } from './semver'
 import { errorMessage, getDraft, problemsOf, putTaskVersion, statusOf } from '../../api/authors'
 import { routeParam, useAuthorRole } from '../../router/authors'
@@ -147,6 +148,8 @@ onBeforeRouteLeave(() => wizardStep.value === 1 || saving.value || window.confir
             </p>
           </header>
           <p v-if="notice" class="rounded bg-green-50 p-2 text-green-900">{{ notice }}</p>
+
+          <VersionGraphView :task-id="current.id" :draft-version="current" />
 
           <ol class="flex gap-4 text-sm">
             <li v-for="(label, i) in WIZARD" :key="label" :class="wizardStep === i + 1 ? 'font-semibold text-blue-700' : 'text-gray-500'">
