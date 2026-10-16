@@ -17,11 +17,13 @@ import (
 
 	"github.com/emeland-io/custos/internal/auth"
 	"github.com/emeland-io/custos/internal/catalogdraft"
+	"github.com/emeland-io/custos/internal/config"
 	"github.com/emeland-io/custos/internal/distribute"
 	"github.com/emeland-io/custos/internal/merge"
 	"github.com/emeland-io/custos/internal/server"
 	"github.com/emeland-io/custos/internal/store"
 	"github.com/emeland-io/custos/internal/webui"
+	"github.com/spf13/cobra"
 )
 
 // defaultAddr listens on loopback only, the conservative default for a
@@ -49,15 +51,20 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 2
 	}
-	if *dataDir == "" {
+	return serveWith(*dataDir, *addr, *publicURL, procOpts, authFlags.values(), stdout, stderr)
+}
+
+// serveWith checks the remaining settings, opens the data directory and serves it.
+func serveWith(dataDir, addr, publicURL string, procOpts processorOptions, av authValues, stdout, stderr io.Writer) int {
+	if dataDir == "" {
 		fmt.Fprintln(stderr, "custos serve: --data-dir or CUSTOS_DATA_DIR is required")
 		return 2
 	}
-	if err := checkPublicURL(*publicURL); err != nil {
+	if err := checkPublicURL(publicURL); err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 2
 	}
-	authCfg, err := authFlags.config(*publicURL)
+	authCfg, err := av.config(publicURL)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 2
@@ -66,7 +73,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	// queued again at the next start.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	srv, err := openServer(ctx, *dataDir, *publicURL, procOpts, authCfg, stderr)
+	srv, err := openServer(ctx, dataDir, publicURL, procOpts, authCfg, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
@@ -76,7 +83,7 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "custos serve: %v\n", err)
 		return 1
 	}
-	return serveUntilDone(ctx, srv, h, *addr, *dataDir, stdout, stderr)
+	return serveUntilDone(ctx, srv, h, addr, dataDir, stdout, stderr)
 }
 
 // shutdownTimeout bounds how long serveUntilDone waits, once ctx is done,
@@ -226,4 +233,53 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// serveKeys are the flags of serve that also have an environment variable.
+var serveKeys = []string{"data-dir", "addr", "public-url", "container-runtime", "secrets-dir", "processor-memory",
+	"trusted-keys", "processor-workers", "max-generation-depth", "oidc-issuer-url", "oidc-client-id",
+	"oidc-client-secret", "oidc-redirect-url", "admin-emails", "session-secret"}
+
+func (c *cli) serveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve [flags]",
+		Short: "serve the repositories over HTTP",
+		// The old dispatcher ignored stray arguments; so does this.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			s, err := config.New(cmd.Flags(), serveKeys, nil)
+			if err != nil {
+				fmt.Fprintf(c.stderr, "custos serve: %v\n", err)
+				return exitCode(1)
+			}
+			procOpts, err := processorOptionsFrom(s)
+			if err != nil {
+				fmt.Fprintf(c.stderr, "custos serve: %v\n", err)
+				return exitCode(2)
+			}
+			av := authValues{issuerURL: s.String("oidc-issuer-url"), clientID: s.String("oidc-client-id"),
+				clientSecret: s.String("oidc-client-secret"), redirectURL: s.String("oidc-redirect-url"),
+				adminEmails: s.String("admin-emails"), sessionSecret: s.String("session-secret")}
+			return result(serveWith(s.String("data-dir"), s.String("addr"), s.String("public-url"), procOpts, av, c.stdout, c.stderr))
+		},
+	}
+	d := defaultProcessorOptions()
+	f := cmd.Flags()
+	f.String("data-dir", "", "directory holding the repositories (env CUSTOS_DATA_DIR)")
+	f.String("addr", defaultAddr, "listen address (env CUSTOS_ADDR); every request still needs a signed-in caller or a valid token, "+
+		"but TLS is the operator's own job (a reverse proxy, typically) — custos itself only ever speaks plain HTTP")
+	f.String("public-url", defaultPublicURL, "base URL clients reach the server at, written into new workspaces (env CUSTOS_PUBLIC_URL)")
+	f.String("container-runtime", d.runtime, "docker, podman, or the path of a compatible client that runs processors (env CUSTOS_CONTAINER_RUNTIME)")
+	f.String("secrets-dir", "", "directory whose file <name> is mounted as processor secret <name>; empty: no secrets (env CUSTOS_SECRETS_DIR)")
+	f.String("processor-memory", d.memory, "memory limit of a processor container (env CUSTOS_PROCESSOR_MEMORY)")
+	f.String("trusted-keys", "", "directory of public keys (*.pem, *.pub) that verify signed documents; empty: none (env CUSTOS_TRUSTED_KEYS)")
+	f.Int("processor-workers", d.workers, "processor runs executed at the same time (env CUSTOS_PROCESSOR_WORKERS)")
+	f.Int("max-generation-depth", d.maxDepth, "levels of generated tasks allowed below a catalog task (env CUSTOS_MAX_GENERATION_DEPTH)")
+	f.String("oidc-issuer-url", "", "OIDC issuer URL; empty runs custos in token-only mode, with no /auth/login (env CUSTOS_OIDC_ISSUER_URL)")
+	f.String("oidc-client-id", "", "OIDC client id (env CUSTOS_OIDC_CLIENT_ID)")
+	f.String("oidc-client-secret", "", "OIDC client secret (env CUSTOS_OIDC_CLIENT_SECRET)")
+	f.String("oidc-redirect-url", "", "URL the identity provider redirects back to; default <public-url>/auth/callback (env CUSTOS_OIDC_REDIRECT_URL)")
+	f.String("admin-emails", "", "comma-separated emails that always have the admin role, in addition to users.json (env CUSTOS_ADMIN_EMAILS)")
+	f.String("session-secret", "", "hex-encoded HMAC key for session cookies, at least 32 bytes (64 hex digits); random and unique to this process if empty, so restarting forgets every session (env CUSTOS_SESSION_SECRET)")
+	return cmd
 }

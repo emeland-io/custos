@@ -23,7 +23,8 @@ func TestServeNeedsDataDir(t *testing.T) {
 
 func TestServeDefaultsToLoopback(t *testing.T) {
 	t.Setenv("CUSTOS_ADDR", "")
-	code, _, errs := runCmd(t, "serve", "-h")
+	code, out, errs := runCmd(t, "serve", "-h")
+	errs += out // the old dispatcher prints help to stderr, cobra to stdout
 	if code != 0 || !strings.Contains(errs, `(default "127.0.0.1:8080")`) {
 		t.Errorf("code %d err %q", code, errs)
 	}
@@ -100,7 +101,8 @@ func TestServeStartsAndServesHealthz(t *testing.T) {
 
 func TestServePublicURL(t *testing.T) {
 	t.Setenv("CUSTOS_PUBLIC_URL", "")
-	code, _, errs := runCmd(t, "serve", "-h")
+	code, out, errs := runCmd(t, "serve", "-h")
+	errs += out // the old dispatcher prints help to stderr, cobra to stdout
 	if code != 0 || !strings.Contains(errs, `(default "http://127.0.0.1:8080")`) {
 		t.Errorf("code %d err %q", code, errs)
 	}

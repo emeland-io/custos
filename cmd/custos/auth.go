@@ -45,35 +45,50 @@ func defineAuthFlags(fl *flag.FlagSet) *authFlagSet {
 	}
 }
 
+// authValues are the resolved auth settings of serve.
+type authValues struct {
+	issuerURL, clientID, clientSecret, redirectURL string
+	adminEmails, sessionSecret                     string
+}
+
+func (f *authFlagSet) values() authValues {
+	return authValues{*f.issuerURL, *f.clientID, *f.clientSecret, *f.redirectURL, *f.adminEmails, *f.sessionSecret}
+}
+
+// config builds an auth.Config from the parsed flags (see authValues.config).
+func (f *authFlagSet) config(publicURL string) (auth.Config, error) {
+	return f.values().config(publicURL)
+}
+
 // config builds an auth.Config from the parsed flags. publicURL is
 // --public-url, already validated by checkPublicURL; it supplies
 // --oidc-redirect-url's default.
-func (f *authFlagSet) config(publicURL string) (auth.Config, error) {
+func (v authValues) config(publicURL string) (auth.Config, error) {
 	cfg := auth.Config{SessionTTL: defaultSessionTTL}
-	if *f.sessionSecret != "" {
-		secret, err := hex.DecodeString(*f.sessionSecret)
+	if v.sessionSecret != "" {
+		secret, err := hex.DecodeString(v.sessionSecret)
 		if err != nil || len(secret) < 32 {
 			return auth.Config{}, fmt.Errorf("--session-secret must be at least 32 bytes of hex (64 digits)")
 		}
 		cfg.SessionSecret = secret
 	}
-	for _, e := range strings.Split(*f.adminEmails, ",") {
+	for _, e := range strings.Split(v.adminEmails, ",") {
 		if e = strings.TrimSpace(e); e != "" {
 			cfg.AdminEmails = append(cfg.AdminEmails, e)
 		}
 	}
 	switch {
-	case *f.issuerURL == "" && (*f.clientID != "" || *f.clientSecret != "" || *f.redirectURL != ""):
+	case v.issuerURL == "" && (v.clientID != "" || v.clientSecret != "" || v.redirectURL != ""):
 		return auth.Config{}, fmt.Errorf("--oidc-client-id, --oidc-client-secret and --oidc-redirect-url need --oidc-issuer-url")
-	case *f.issuerURL == "":
+	case v.issuerURL == "":
 		return cfg, nil // token-only mode
-	case *f.clientID == "" || *f.clientSecret == "":
+	case v.clientID == "" || v.clientSecret == "":
 		return auth.Config{}, fmt.Errorf("--oidc-issuer-url needs --oidc-client-id and --oidc-client-secret")
 	}
-	redirect := *f.redirectURL
+	redirect := v.redirectURL
 	if redirect == "" {
 		redirect = strings.TrimRight(publicURL, "/") + "/auth/callback"
 	}
-	cfg.OIDC = &auth.OIDCConfig{IssuerURL: *f.issuerURL, ClientID: *f.clientID, ClientSecret: *f.clientSecret, RedirectURL: redirect}
+	cfg.OIDC = &auth.OIDCConfig{IssuerURL: v.issuerURL, ClientID: v.clientID, ClientSecret: v.clientSecret, RedirectURL: redirect}
 	return cfg, nil
 }

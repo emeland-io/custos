@@ -44,7 +44,8 @@ func TestServeProcessorFlags(t *testing.T) {
 		"CUSTOS_PROCESSOR_WORKERS", "CUSTOS_MAX_GENERATION_DEPTH", "CUSTOS_TRUSTED_KEYS"} {
 		t.Setenv(name, "")
 	}
-	code, _, errs := runCmd(t, "serve", "-h")
+	code, out, errs := runCmd(t, "serve", "-h")
+	errs += out // the old dispatcher prints help to stderr, cobra to stdout
 	if code != 0 {
 		t.Fatalf("code %d", code)
 	}
@@ -210,4 +211,22 @@ func seedCatalogFiles(t *testing.T, data string, files map[string]string) {
 	work := gittest.Init(t)
 	gittest.Commit(t, work, files)
 	gittest.Run(t, work, "push", "--quiet", st.CatalogRepo().Dir, "main")
+}
+
+func TestServeEnvironmentAndFlagPrecedence(t *testing.T) {
+	t.Setenv("CUSTOS_PROCESSOR_WORKERS", "many")
+	if code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir()); code != 2 || !strings.Contains(errs, "CUSTOS_PROCESSOR_WORKERS") {
+		t.Fatalf("malformed variable: code %d err %q", code, errs)
+	}
+	if legacyCLI {
+		return // ruling 5.7: the old dispatcher reports a malformed variable even when a flag overrides it
+	}
+	// Ruling 5.7: a flag that overrides the variable makes its malformed value irrelevant.
+	// --addr 127.0.0.1:1 cannot be bound by a normal user, so serve stops with exit 1
+	// *after* every setting was accepted.
+	t.Setenv("CUSTOS_ADDR", "")
+	code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir(), "--processor-workers", "3", "--addr", "127.0.0.1:1")
+	if code == 2 {
+		t.Errorf("flag over malformed variable was rejected: %q", errs)
+	}
 }

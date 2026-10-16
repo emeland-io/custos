@@ -13,6 +13,7 @@ import (
 	"github.com/emeland-io/custos/internal/api"
 	"github.com/emeland-io/custos/internal/attest/carabiner"
 	"github.com/emeland-io/custos/internal/blobs"
+	"github.com/emeland-io/custos/internal/config"
 	"github.com/emeland-io/custos/internal/runner"
 	"github.com/emeland-io/custos/internal/runs"
 	"github.com/emeland-io/custos/internal/server"
@@ -62,19 +63,37 @@ func defineProcessorFlags(fl *flag.FlagSet) *processorFlags {
 func (f *processorFlags) options() (processorOptions, error) {
 	o := processorOptions{runtime: *f.runtime, secretsDir: *f.secretsDir, memory: *f.memory,
 		trustedKeys: *f.trustedKeys, workers: *f.workers, maxDepth: *f.maxDepth}
-	switch {
-	case f.envErr != nil:
+	if f.envErr != nil {
 		return o, f.envErr
-	case o.runtime == "":
-		return o, errors.New("--container-runtime must not be empty")
-	case o.memory == "":
-		return o, errors.New("--processor-memory must not be empty")
-	case o.workers < 1:
-		return o, fmt.Errorf("--processor-workers must be at least 1, got %d", o.workers)
-	case o.maxDepth < 1:
-		return o, fmt.Errorf("--max-generation-depth must be at least 1, got %d", o.maxDepth)
 	}
-	return o, nil
+	return o, o.check()
+}
+
+// check rejects values serve cannot work with.
+func (o processorOptions) check() error {
+	switch {
+	case o.runtime == "":
+		return errors.New("--container-runtime must not be empty")
+	case o.memory == "":
+		return errors.New("--processor-memory must not be empty")
+	case o.workers < 1:
+		return fmt.Errorf("--processor-workers must be at least 1, got %d", o.workers)
+	case o.maxDepth < 1:
+		return fmt.Errorf("--max-generation-depth must be at least 1, got %d", o.maxDepth)
+	}
+	return nil
+}
+
+// processorOptionsFrom reads the processor settings of serve.
+func processorOptionsFrom(s *config.Settings) (processorOptions, error) {
+	workers, errW := s.Int("processor-workers")
+	depth, errD := s.Int("max-generation-depth")
+	o := processorOptions{runtime: s.String("container-runtime"), secretsDir: s.String("secrets-dir"),
+		memory: s.String("processor-memory"), trustedKeys: s.String("trusted-keys"), workers: workers, maxDepth: depth}
+	if err := errors.Join(errW, errD); err != nil {
+		return o, err
+	}
+	return o, o.check()
 }
 
 // envInt reads an integer from the environment; unset or empty gives
