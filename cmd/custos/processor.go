@@ -23,11 +23,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/emeland-io/custos/internal/attest"
 	"github.com/emeland-io/custos/internal/attest/carabiner"
 	"github.com/emeland-io/custos/internal/catalog"
+	"github.com/emeland-io/custos/internal/config"
 	"github.com/emeland-io/custos/internal/contract"
 	"github.com/emeland-io/custos/internal/frontmatter"
 	"github.com/emeland-io/custos/internal/match"
@@ -84,7 +86,13 @@ func runProcessor(args []string, stdout, stderr io.Writer) int {
 			return helpOrUsage(err)
 		}
 	}
-	if pt.image == "" || fl.NArg() != 0 || pt.answerPath == "" || pt.timeout <= 0 {
+	return doProcessorTest(pt, fl.NArg(), stdout, stderr)
+}
+
+// doProcessorTest checks pt and runs it. extraArgs counts the positional
+// arguments left over after the image.
+func doProcessorTest(pt processorTest, extraArgs int, stdout, stderr io.Writer) int {
+	if pt.image == "" || extraArgs != 0 || pt.answerPath == "" || pt.timeout <= 0 {
 		fmt.Fprint(stderr, processorUsage)
 		return 2
 	}
@@ -500,4 +508,49 @@ func printLog(w io.Writer, log []byte) {
 	if log[len(log)-1] != '\n' {
 		fmt.Fprintln(w)
 	}
+}
+
+func (c *cli) processorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "processor",
+		Short: "work with processors",
+		Args:  cobra.ArbitraryArgs,
+		RunE:  func(*cobra.Command, []string) error { return usageError(processorUsage) },
+	}
+	var pt processorTest
+	test := &cobra.Command{
+		Use:   "test IMAGE --answer FILE [flags]",
+		Short: "run a processor image on an answer and print its proposal",
+		// IMAGE may come before or after the flags, as before.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Only --container-runtime has an environment variable here; the
+			// processor test's --secrets-dir and --trusted-keys never did.
+			s, err := config.New(cmd.Flags(), []string{"container-runtime"}, nil)
+			if err != nil {
+				fmt.Fprintf(c.stderr, "custos processor test: %v\n", err)
+				return exitCode(1)
+			}
+			pt.runtime = s.String("container-runtime")
+			extra := 0
+			if len(args) > 0 {
+				pt.image = args[0]
+				extra = len(args) - 1
+			}
+			return result(doProcessorTest(pt, extra, c.stdout, c.stderr))
+		},
+	}
+	f := test.Flags()
+	f.StringVar(&pt.answerPath, "answer", "", "answer file in the workspace format (answers/<task-uuid>.md)")
+	f.StringVar(&pt.taskPath, "task", "", "task version file (default: a task made up from the answer)")
+	f.StringVar(&pt.previousDir, "previous", "", "directory laid out like a workspace whose generated/ and documents/ hold earlier output")
+	f.StringVar(&pt.blobsDir, "blobs", "", "directory with the answer's attachments named by their SHA-256 (default: .custos/blobs/sha256 of the checkout holding the answer)")
+	f.StringVar(&pt.secretsDir, "secrets-dir", "", "every file in this directory is mounted as a secret at /run/secrets/<name>")
+	f.BoolVar(&pt.network, "network", false, "give the processor network access")
+	f.DurationVar(&pt.timeout, "timeout", 60*time.Second, "kill the processor after this time")
+	f.StringVar(&pt.trustedKeys, "trusted-keys", "", "directory with trusted public keys (*.pem, *.pub); without it signatures are not checked")
+	f.StringVar(&pt.workspaceID, "workspace-id", testWorkspaceID, "workspace id sent to the processor")
+	f.String("container-runtime", "docker", "docker, podman, or the path of either (env CUSTOS_CONTAINER_RUNTIME)")
+	cmd.AddCommand(test)
+	return cmd
 }

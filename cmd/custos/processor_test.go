@@ -173,6 +173,23 @@ func TestProcessorTestRejectsBadInput(t *testing.T) {
 	}
 }
 
+// The runtime comes from --container-runtime, else CUSTOS_CONTAINER_RUNTIME.
+// A runtime that does not exist fails before any container starts and the
+// error names it, which shows which source won.
+func TestProcessorTestContainerRuntimeSources(t *testing.T) {
+	answer := writeAnswer(t, t.TempDir(), fixture.AnswerFile)
+	base := []string{"processor", "test", "custos.test/none:latest", "--answer", answer}
+	t.Setenv("CUSTOS_CONTAINER_RUNTIME", "/nonexistent/env-runtime")
+	code, _, errs := runCmd(t, base...)
+	if code != 1 || !strings.Contains(errs, "/nonexistent/env-runtime") {
+		t.Errorf("env: code %d, stderr %q", code, errs)
+	}
+	code, _, errs = runCmd(t, append(base, "--container-runtime", "/nonexistent/flag-runtime")...)
+	if code != 1 || !strings.Contains(errs, "/nonexistent/flag-runtime") || strings.Contains(errs, "env-runtime") {
+		t.Errorf("flag: code %d, stderr %q", code, errs)
+	}
+}
+
 func TestProcessorTestUnknownImage(t *testing.T) {
 	answer := writeAnswer(t, t.TempDir(), fixture.AnswerFile)
 	code, out, errs := runCmd(t, "processor", "test", "custos.test/does-not-exist:latest", "--answer", answer)
