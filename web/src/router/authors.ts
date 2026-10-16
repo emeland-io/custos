@@ -38,5 +38,10 @@ export const authorRoutes: RouteRecordRaw[] = [
     name: 'catalog-draft',
     component: () => import('../views/taskauthor/DraftsView.vue'),
   },
+  {
+    path: '/catalog/drafts/:draftId/groups/:slug',
+    name: 'catalog-draft-group',
+    component: () => import('../views/taskauthor/GroupTreeView.vue'),
+  },
   // plan 4d: later tasks insert their routes above this line
 ]
