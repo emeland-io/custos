@@ -215,11 +215,33 @@ custos push [--dir DIR] [REMOTE [GIT-PUSH-ARGS...]]
                                                          # upload attachments, then git push
 custos processor test IMAGE --answer FILE [--previous DIR] [...]
                                                          # run a processor locally, print its proposal
+custos config get server-url [--show-source]             # print the server URL custos would use
+custos config set server-url URL                         # remember it in ~/.config/custos/config.yaml
 ```
 
 `workspace create` and `serve` need `--data-dir` or `CUSTOS_DATA_DIR`.
 `workspace create` also needs `--author` or `CUSTOS_AUTHOR`, the author of
 the workspace's first commit.
+
+### Settings: file, environment, flag
+
+A setting can come from three places. A later one wins:
+
+1. the personal config file, `~/.config/custos/config.yaml` (`$XDG_CONFIG_HOME/custos/config.yaml` when that is set to an absolute path; `--config FILE` picks another file). Only `server-url` is read from it; other keys are ignored with a warning, so a secret in that file is never used. `custos config set server-url URL` writes it with mode 0600.
+2. an environment variable
+3. a command-line flag
+
+| Flag | Variable |
+| --- | --- |
+| `--server-url` | `CUSTOS_SERVER_URL` |
+| `--data-dir` | `CUSTOS_DATA_DIR` |
+| `--addr` | `CUSTOS_ADDR` |
+| `--public-url` | `CUSTOS_PUBLIC_URL` |
+| `--author` | `CUSTOS_AUTHOR` |
+| `--container-runtime`, `--secrets-dir`, `--processor-memory`, `--processor-workers`, `--max-generation-depth`, `--trusted-keys` | `CUSTOS_` plus the flag name in capitals, `_` for `-` (`serve`; `processor test` reads only `CUSTOS_CONTAINER_RUNTIME`) |
+| `--oidc-issuer-url`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-redirect-url`, `--admin-emails`, `--session-secret` | likewise (`serve`) |
+
+An empty variable counts as unset. Flags that are not in this table (`--dir`, `--email`, `--admin`, …) are never read from the environment. `custos push` and `custos clone` send the token in `CUSTOS_TOKEN`. `--server-url` is a client-side setting, separate from the server's `--public-url`; today only `custos config get` uses it.
 
 In the root of a git checkout, `custos validate` checks the staged content
 (the git index), which is what the next commit will hold: untracked and

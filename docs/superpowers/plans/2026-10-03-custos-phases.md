@@ -13,6 +13,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Done, merged to `main` on 2026-10-04 (`43ad0c9`) |
 | 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Done, not yet merged to `main` |
 | 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Done, not yet merged to `main` |
+| 5 cobra/viper command line | Replace the `flag` dispatcher with cobra; flag, environment and personal config file layered with viper; `custos config get\|set` | Done, not yet merged to `main` |
 
 ## Phase 1 — Core
 
@@ -268,3 +269,48 @@ time). `make test` now runs `go test ./... -race -count=1` (previously no
 
 Phase 4 is complete on branch `worktree-worktree-phase-4` — not yet merged
 to `main` — and ready for the finishing step.
+
+## Phase 5 — cobra/viper command line
+
+- Plan: [2026-10-16-cobra-viper-cli.md](2026-10-16-cobra-viper-cli.md), 13 tasks.
+- Executed with subagent-driven development on branch `worktree-phase-5-cobra-viper`: one implementer and one reviewer per task. Final whole-branch review pending.
+- Status: all 13 tasks implemented. Done, not yet merged to `main`.
+- Rulings: spec §11.5 (5.1–5.10 from planning, 5.11–5.15 made while executing).
+
+The tasks:
+
+1. `internal/config`: environment allowlist, viper-backed settings, config file read and write, URL check.
+2. cobra root command and the `run` seam, with the old dispatcher kept behind `legacyCLI`.
+3. `custos config get|set`.
+4. `validate`.
+5. `task new-version`.
+6. `workspace create`.
+7. `token create`.
+8. `clone` and `push`.
+9. `hook pre-receive`.
+10. `processor test`.
+11. `serve`.
+12. Cut-over: the command line runs on cobra, and every command is listed in the root help.
+13. This documentation: README, spec §6.2 and §11.5, this file.
+
+Two tasks needed a fix round: Task 9 (the hook port had no success- or rejection-path test, ruling 5.12) and Task 11 (the serve precedence test bound a privileged port and could hang as root, ruling 5.15).
+
+Verified: `make test` passed at the cut-over commit `b64a330` (Go vet, race tests, the `cmd/custos` tests against both the cobra and the old dispatcher, both SDKs, the web type check).
+
+The three deliberate behavior changes (ruling 5.7):
+
+- `-h` help is cobra's and goes to stdout (it went to stderr).
+- Single-dash long flags (`-data-dir`) are no longer accepted.
+- A malformed `CUSTOS_PROCESSOR_WORKERS` is not reported when `--processor-workers` overrides it.
+
+Left for later:
+
+- Delete the old dispatcher and its helpers (ruling 5.10a): `runLegacy`, `legacyCLI`, `legacy_hook_test.go`, the legacy `runX` parsing wrappers, `envOr`/`envInt`, the Makefile's second test run. Then update the comments that mention it (`errs += out` in the serve tests).
+- `custos clone` by name, resolved against `server-url` (ruling 5.10b); decide then whether `workspace create` defaults `--public-url` from it (rejected for now, ruling 5.5).
+- `config.Set`: no `Sync` before the rename; `MkdirAll` does not tighten an existing, looser directory; rewriting the file drops YAML comments. `CheckURL` accepts an empty hostname (`https://:80`), and `config get` prints a `--server-url` flag value without checking it.
+- No test for `run()`'s routing (unported commands to the old dispatcher, `legacyCLI` forcing it); `TestEveryCommandIsListed` uses loose `strings.Contains`. `hook` is unlisted on purpose.
+- Several tests guard against regressions rather than pin behavior: `TestWorkspaceCreateIgnoresServerURL` only exercises the environment and discards the exit code; the stray-environment and `TestTokenCreateDataDirFromEnvironment` tests assert little; `TestConfigUsage`, `TestValidateTooManyArguments` and the broken-config tests check exit codes or non-empty output, not the text.
+- `push`: the `Use` string does not say flags after REMOTE go to git, and the nil-versus-empty `DeepEqual` pin is brittle.
+- Hook tests cover only `--kind catalog`; dropping the `--kind` or `--workspace` flags would not be caught.
+- `processor test`: the container-runtime test relies on the runner's error echoing the path and does not test the default `docker`; the bare `processor` usage path has no direct test.
+- Comment nit: the parent `task` command's `ArbitraryArgs` has no explanatory comment.
