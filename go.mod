@@ -11,6 +11,7 @@ require (
 	github.com/carabiner-dev/signer v0.6.2
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/google/uuid v1.6.0
+	github.com/yuin/goldmark v1.8.6
 	golang.org/x/oauth2 v0.36.0
 )
 

@@ -28,6 +28,7 @@ type TaskStatus struct {
 	Current    task.Ref // current version
 	Title      string
 	AnswerType task.AnswerType
+	Choices    []string // valid values when AnswerType == task.AnswerChoice
 	Generated  bool
 	State      State
 	Answer     *workspace.Answer   // this task's own answer file, any version; nil if none
@@ -101,6 +102,7 @@ type builder struct {
 func (b *builder) add(g *task.Graph, cur *task.Version, generated bool) {
 	ts := &TaskStatus{
 		ID: cur.ID, Current: cur.Ref(), Title: cur.Title, AnswerType: cur.AnswerType,
+		Choices:   cur.Choices,
 		Generated: generated, Answer: b.answer(cur.ID),
 	}
 	for _, id := range slices.Sorted(maps.Keys(reach(g, cur))) {

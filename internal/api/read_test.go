@@ -82,6 +82,46 @@ func TestBook(t *testing.T) {
 	}
 }
 
+func TestGetBookHTML(t *testing.T) {
+	e, _ := answeredEnv(t)
+	rec := e.do(t, "GET", "/api/workspaces/"+fixture.WorkspaceID+"/book?format=html", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if body := rec.Body.String(); !strings.HasPrefix(body, "<!DOCTYPE html>") || !strings.Contains(body, "done with make") {
+		t.Errorf("body is not an HTML document:\n%s", body)
+	}
+
+	rec = e.do(t, "GET", "/api/workspaces/"+fixture.WorkspaceID+"/book", "", "")
+	if ct := rec.Header().Get("Content-Type"); ct != "text/markdown; charset=utf-8" {
+		t.Errorf("default format Content-Type = %q, want text/markdown", ct)
+	}
+}
+
+// TestGetStatusChoices checks that the status endpoint carries a choice
+// task's valid choices, so a frontend can render its answer form (plan 4c
+// gap, closed by Task 8's cross-plan fix).
+func TestGetStatusChoices(t *testing.T) {
+	e := newEnv(t, testCatalog())
+	e.createWorkspace(t)
+	s := decode[statusJSON](t, e.do(t, "GET", "/api/workspaces/"+fixture.WorkspaceID+"/status", "", ""), http.StatusOK)
+	var got *taskStatusJSON
+	for i := range s.Tasks {
+		if s.Tasks[i].ID == taskChoice {
+			got = &s.Tasks[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("task %s not in status: %+v", taskChoice, s.Tasks)
+	}
+	if !slices.Equal(got.Choices, []string{"green", "red"}) {
+		t.Errorf("choices = %v, want [green red]", got.Choices)
+	}
+}
+
 func TestGetAnswer(t *testing.T) {
 	e, sha := answeredEnv(t)
 	got := decode[answerJSON](t, e.do(t, "GET", "/api/workspaces/"+fixture.WorkspaceID+"/answers/"+fixture.TaskA, "", ""), http.StatusOK)

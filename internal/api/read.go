@@ -32,6 +32,7 @@ type taskStatusJSON struct {
 	Version    string          `json:"version"` // current version
 	Title      string          `json:"title"`
 	AnswerType task.AnswerType `json:"answer_type"`
+	Choices    []string        `json:"choices,omitempty"`
 	Generated  bool            `json:"generated"`
 	State      status.State    `json:"state"`
 	Answer     *answerJSON     `json:"answer"`    // the task's own answer file, any version
@@ -84,6 +85,7 @@ func (a *API) statusToJSON(s *status.Status) statusJSON {
 	for _, ts := range s.Tasks {
 		tj := taskStatusJSON{
 			ID: ts.ID, Version: ts.Current.Version, Title: ts.Title, AnswerType: ts.AnswerType,
+			Choices:   ts.Choices,
 			Generated: ts.Generated, State: ts.State,
 			Merged: a.answersToJSON(ts.Merged), InEffect: a.answersToJSON(ts.InEffect),
 		}
@@ -124,11 +126,19 @@ func (a *API) getStatus(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, a.statusToJSON(s))
 }
 
-// getBook serves the book as Markdown (ruling 2.11).
+// getBook serves the book as Markdown by default, or as a complete HTML
+// document with ?format=html (ruling 2.11, extended by the architecture
+// note: HTML export arrives with the web UI, phase 4).
 func (a *API) getBook(w http.ResponseWriter, r *http.Request) {
 	s, err := a.workspaceStatus(r)
 	if err != nil {
 		WriteError(w, err)
+		return
+	}
+	if r.URL.Query().Get("format") == "html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write(status.RenderHTML(s))
 		return
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
