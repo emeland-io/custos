@@ -24,6 +24,9 @@ func TestRunCobraRoot(t *testing.T) {
 	if code, _, errs := cobraCmd(t, "--nope"); code != 2 || !strings.Contains(errs, "unknown flag: --nope") {
 		t.Errorf("unknown flag: %d %q", code, errs)
 	}
+	if code, _, errs := cobraCmd(t, "completion", "bogus"); code != 2 || !strings.Contains(errs, `unknown command "completion"`) {
+		t.Errorf("completion: %d %q", code, errs)
+	}
 	if code, out, errs := cobraCmd(t, "-h"); code != 0 || !strings.Contains(out, "Usage:") || errs != "" {
 		t.Errorf("-h: %d out %q err %q", code, out, errs)
 	}

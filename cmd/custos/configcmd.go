@@ -48,16 +48,20 @@ func (c *cli) configCmd() *cobra.Command {
 					config.KeyServerURL, config.KeyServerURL, config.EnvNames[config.KeyServerURL], path)
 				return exitCode(1)
 			}
-			if !showSource {
-				fmt.Fprintln(c.stdout, val)
-				return nil
-			}
 			from := string(s.Source(config.KeyServerURL))
 			switch s.Source(config.KeyServerURL) {
 			case config.SourceEnv:
 				from = "env " + config.EnvNames[config.KeyServerURL]
 			case config.SourceFile:
 				from = "file " + path
+			}
+			if err := config.CheckURL(val); err != nil {
+				fmt.Fprintf(c.stderr, "custos config get: %s: %v\n", from, err)
+				return exitCode(1)
+			}
+			if !showSource {
+				fmt.Fprintln(c.stdout, val)
+				return nil
 			}
 			fmt.Fprintf(c.stdout, "%s (%s)\n", val, from)
 			return nil

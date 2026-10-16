@@ -195,7 +195,7 @@ func ReadFile(path string, warn io.Writer) (map[string]string, error) {
 // or fragment.
 func CheckURL(s string) error {
 	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("%q is not an absolute http or https URL", s)
 	}
 	return nil

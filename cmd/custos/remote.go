@@ -83,7 +83,9 @@ func (c *cli) pushCmd() *cobra.Command {
 		Use:   "push [--dir DIR] [REMOTE [GIT-PUSH-ARGS...]]",
 		Short: "upload the attachments of the commits to push, then git push",
 		Args:  cobra.ArbitraryArgs,
-		RunE:  func(_ *cobra.Command, args []string) error { return result(doPush(dir, args, c.stderr)) },
+		// Flags after REMOTE go to git, so cobra's "[flags]" would mislead.
+		DisableFlagsInUseLine: true,
+		RunE:                  func(_ *cobra.Command, args []string) error { return result(doPush(dir, args, c.stderr)) },
 	}
 	// Stop at the first argument, as the standard flag package did: what
 	// follows REMOTE, flags included, belongs to git.

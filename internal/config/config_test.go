@@ -180,7 +180,7 @@ func TestSet(t *testing.T) {
 	if err := Set(path, "data-dir", "/x"); err == nil {
 		t.Error("only server-url may be set")
 	}
-	for _, bad := range []string{"", "ftp://x", "custos.example.org", "https://u:p@x", "https://x?q=1"} {
+	for _, bad := range []string{"", "ftp://x", "custos.example.org", "https://u:p@x", "https://x?q=1", "https://:80"} {
 		if err := Set(path, KeyServerURL, bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}

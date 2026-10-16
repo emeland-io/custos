@@ -62,6 +62,7 @@ func newRootCmd(c *cli) *cobra.Command {
 			return usageError(cmd.UsageString())
 		},
 	}
+	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetIn(c.stdin)
 	root.SetOut(c.stdout)
 	root.SetErr(c.stderr)
@@ -80,6 +81,10 @@ func newRootCmd(c *cli) *cobra.Command {
 func runCobra(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	c := &cli{stdin: stdin, stdout: stdout, stderr: stderr}
 	root := newRootCmd(c)
+	if args == nil {
+		// SetArgs(nil) would make cobra parse os.Args[1:].
+		args = []string{}
+	}
 	root.SetArgs(args)
 	err := root.Execute()
 	var code exitCode
