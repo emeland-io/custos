@@ -39,5 +39,19 @@ web/dist/*
 !web/dist/.gitkeep
 /.claude/worktrees/
 
+# internal/webui/dist is go:embed's source (ruling 4.2): a fresh clone with
+# zero npm must still `go build`/`go test` successfully, so .gitkeep and the
+# placeholder index.html stay tracked ("no matching files" would fail the
+# embed without at least one non-dotfile present). `make build`'s web-build
+# step overwrites index.html with the real build and adds a generated
+# assets/ directory; ignoring everything else here keeps that assets/
+# directory (and any other Vite output) from ever being staged by an
+# unqualified `git add -A` after a real build. index.html itself will still
+# show as locally modified after `make build` — that's expected; restore
+# the placeholder with `git checkout -- internal/webui/dist/index.html`.
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+!internal/webui/dist/index.html
+
 # Python
 __pycache__/
