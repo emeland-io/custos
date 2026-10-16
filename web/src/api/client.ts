@@ -27,6 +27,19 @@ async function parseBody(res: Response): Promise<unknown> {
   return text ? JSON.parse(text) : undefined
 }
 
+// parseErrorBody never throws: an intervening proxy can return a non-2xx
+// response with a non-JSON body (an HTML error page, plain text, nothing),
+// and that must still produce a clean ApiError rather than an uncaught
+// SyntaxError from JSON.parse.
+async function parseErrorBody(res: Response): Promise<ErrorBody> {
+  try {
+    const data = await parseBody(res)
+    return (data as ErrorBody) ?? { error: res.statusText }
+  } catch {
+    return { error: res.statusText || `request failed with status ${res.status}` }
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { ...authHeaders() }
   let requestBody: BodyInit | undefined
@@ -36,11 +49,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const res = await fetch(path, { method, headers, body: requestBody, credentials: 'include' })
   if (res.status === 204) return undefined as T
-  const data = await parseBody(res)
   if (!res.ok) {
-    throw new ApiError(res.status, (data as ErrorBody) ?? { error: res.statusText })
+    throw new ApiError(res.status, await parseErrorBody(res))
   }
-  return data as T
+  return (await parseBody(res)) as T
 }
 
 export const api = {
@@ -59,10 +71,9 @@ export const api = {
       body: file,
       credentials: 'include',
     })
-    const data = await parseBody(res)
     if (!res.ok) {
-      throw new ApiError(res.status, (data as ErrorBody) ?? { error: res.statusText })
+      throw new ApiError(res.status, await parseErrorBody(res))
     }
-    return data as { sha256: string; size: number }
+    return (await parseBody(res)) as { sha256: string; size: number }
   },
 }
