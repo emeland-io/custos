@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -214,6 +215,7 @@ func seedCatalogFiles(t *testing.T, data string, files map[string]string) {
 }
 
 func TestServeEnvironmentAndFlagPrecedence(t *testing.T) {
+	t.Setenv("CUSTOS_ADDR", "")
 	t.Setenv("CUSTOS_PROCESSOR_WORKERS", "many")
 	if code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir()); code != 2 || !strings.Contains(errs, "CUSTOS_PROCESSOR_WORKERS") {
 		t.Fatalf("malformed variable: code %d err %q", code, errs)
@@ -222,11 +224,15 @@ func TestServeEnvironmentAndFlagPrecedence(t *testing.T) {
 		return // ruling 5.7: the old dispatcher reports a malformed variable even when a flag overrides it
 	}
 	// Ruling 5.7: a flag that overrides the variable makes its malformed value irrelevant.
-	// --addr 127.0.0.1:1 cannot be bound by a normal user, so serve stops with exit 1
-	// *after* every setting was accepted.
-	t.Setenv("CUSTOS_ADDR", "")
-	code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir(), "--processor-workers", "3", "--addr", "127.0.0.1:1")
-	if code == 2 {
-		t.Errorf("flag over malformed variable was rejected: %q", errs)
+	// An address that is already in use makes serve stop with exit 1
+	// *after* every setting was accepted, deterministically and without a listener left behind.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	code, _, errs := runCmd(t, "serve", "--data-dir", t.TempDir(), "--processor-workers", "3", "--addr", ln.Addr().String())
+	if code != 1 || strings.Contains(errs, "CUSTOS_PROCESSOR_WORKERS") || strings.Contains(errs, "whole number") {
+		t.Errorf("flag over malformed variable: code %d err %q", code, errs)
 	}
 }
