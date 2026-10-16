@@ -21,7 +21,12 @@ their own, as a new pin or, for frozen workspaces, as a pin proposal.
 Workspaces can be forked, and branches merged into `main`. Processors run
 on the answers of their tasks and propose generated tasks and documents
 for review; SDKs for Go and Python and `custos processor test` help to
-write them. The web UI follows.
+write them. A web UI is built in and served at the server's address
+(`http://<addr>/`, `127.0.0.1:8080` by default): sign in with your
+organization's identity provider when the server has one configured
+(`--oidc-*` flags below), or paste a personal access token on the sign-in
+page when it does not (token-only mode — see
+[Authentication](#authentication)).
 
 ## Catalog
 
@@ -227,13 +232,19 @@ repository root.
 
 ## Running
 
-Requires Go 1.26 and git 2.38 or later, and Docker or Podman on the
-server's host to run processors.
+Requires Go 1.26, git 2.38 or later, and Node.js (≥ 20) and npm on `PATH`
+to build the web UI (`make build` needs them; see
+[Development](#development)), and Docker or Podman on the server's host
+to run processors.
 
 ```sh
 make build
 ./custos serve --data-dir ./data
-git push http://127.0.0.1:8080/git/catalog.git main
+./custos token create --data-dir ./data --email jane@example.org \
+    --name "Jane Doe" --admin
+# prints a token once — export it for the commands below
+export CUSTOS_TOKEN=<the printed token>
+git push "http://token:$CUSTOS_TOKEN@127.0.0.1:8080/git/catalog.git" main
 ```
 
 Repositories are served at `/git/catalog.git` and
@@ -250,7 +261,7 @@ your answers on top:
 ```sh
 ./custos workspace create --data-dir ./data --author "Jane Doe <jane@example.org>" \
     5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
-git clone http://127.0.0.1:8080/git/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9.git
+git clone "http://token:$CUSTOS_TOKEN@127.0.0.1:8080/git/workspaces/5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9.git"
 ```
 
 | Flag | Environment | Default |
@@ -278,14 +289,18 @@ Flags win over environment variables. Run the built binary rather than
 Every request below `/api/` and `/git/` needs a signed-in caller; `custos`
 has two ways to sign one in:
 
-- **OIDC.** Pass `--oidc-issuer-url`, `--oidc-client-id`,
-  `--oidc-client-secret` and `--oidc-redirect-url` (or their
-  `CUSTOS_OIDC_*` environment variables) to `custos serve`. A browser signs
-  in at `GET /auth/login` and gets a signed session cookie; `--admin-emails`
-  (comma-separated) grants the admin role to matching accounts the first
-  time they sign in. `--session-secret` (or `CUSTOS_SESSION_SECRET`) signs
-  the session and sign-in-state cookies; generate one with
-  `openssl rand -base64 32` and keep it stable across restarts, or every
+- **OIDC.** Pass `--oidc-issuer-url`, `--oidc-client-id` and
+  `--oidc-client-secret` (or their `CUSTOS_OIDC_*` environment variables)
+  to `custos serve`. `--oidc-redirect-url` is optional; it defaults to
+  `<public-url>/auth/callback` and only needs setting when the IdP must be
+  told a different callback URL. A browser signs in at `GET /auth/login`
+  and gets a signed session cookie; `--admin-emails` (comma-separated) is
+  checked fresh on every request, so adding an email grants the admin role
+  to that account on its very next request, with no restart and no need
+  for that person to sign in again first. `--session-secret` (or
+  `CUSTOS_SESSION_SECRET`) signs the session and sign-in-state cookies; the
+  flag only accepts hex (at least 32 bytes, 64 hex digits), so generate one
+  with `openssl rand -hex 32` and keep it stable across restarts, or every
   session is invalidated.
 - **Personal access tokens**, for the CLI, CI and `git`/`curl`. Create one
   with `custos token create`:
@@ -330,6 +345,19 @@ everywhere. `GET /auth/me` reports the signed-in caller (`401` when there
 is none); `GET /auth/config` answers `{"oidc": bool}`, unauthenticated,
 so a client can tell "OIDC is configured" apart from "not yet signed in".
 
+| Method and path | Purpose |
+| --- | --- |
+| `GET /auth/login` | 302 to the IdP; 404 when OIDC is not configured |
+| `GET /auth/callback` | OIDC redirect target: exchanges the code, sets the session cookie, 302 to `/` |
+| `POST /auth/logout` | clears the session cookie, 204 |
+| `GET /auth/config` | unauthenticated: `{"oidc": bool}` |
+| `GET /auth/me` | the caller's name, email and roles, or 401 |
+| `GET /auth/tokens` | the caller's own tokens (id, label, created, last used — never the token value) |
+| `POST /auth/tokens` | body `{"label"}` → `{"id","token"}`, the token shown once |
+| `DELETE /auth/tokens/{id}` | revoke one of the caller's own tokens, 204 |
+| `GET /api/admin/users` | **admin only**: every user on file with their roles |
+| `PUT /api/admin/users/{email}/roles` | **admin only**: body `{"admin"?,"task_author"?,"processor_author"?,"engineer"?:[...]}`, merges into that user's record |
+
 ## REST API
 
 The server answers JSON below `/api`. Every request that changes something
@@ -342,7 +370,7 @@ committer; every request, read or write, needs one (see
 | `GET /api/workspaces` | workspaces with their pinned catalog commit and frozen flag |
 | `POST /api/workspaces` | create a workspace pinned to the catalog's `main`; body `{"id": "<uuid>"}`, or none for a new id |
 | `GET /api/workspaces/{id}/status` | every task with its state (`unanswered`, `answered`, `pending-update`), its answer and the answers in effect |
-| `GET /api/workspaces/{id}/book` | the book as Markdown |
+| `GET /api/workspaces/{id}/book` | the book; Markdown by default, or a complete, self-contained HTML document with `?format=html` |
 | `GET /api/workspaces/{id}/answers/{task}` | the answer to a task |
 | `PUT /api/workspaces/{id}/answers/{task}` | write the answer, as one commit on `main` |
 | `POST /api/workspaces/{id}/answers/{task}/still-valid` | keep the answer for the task's current version |
@@ -350,6 +378,15 @@ committer; every request, read or write, needs one (see
 | `GET /api/blobs/{sha256}` | download an attachment |
 | `GET /api/catalog` | groups and current task versions of the catalog's `main` |
 | `GET /api/catalog/tasks/{id}` | all versions of a task |
+| `GET /api/catalog/drafts` | **task-author only**: open catalog drafts |
+| `POST /api/catalog/drafts` | **task-author only**: body `{"title"}`; starts a draft from the catalog's current `main` |
+| `GET /api/catalog/drafts/{id}` | **task-author only**: the draft's tasks, groups, processors and bindings |
+| `PUT /api/catalog/drafts/{id}/tasks/{task}` | **task-author only**: write a new or edited task version on the draft |
+| `PUT /api/catalog/drafts/{id}/groups/{slug}` | **task-author only**: write a group's title and children |
+| `PUT /api/catalog/drafts/{id}/groups-index` | **task-author only**: write the top-level group order |
+| `PUT /api/catalog/drafts/{id}/processors` | **task-author only**: write the processor registry and bindings |
+| `DELETE /api/catalog/drafts/{id}` | **task-author only**: discard the draft, 204 |
+| `POST /api/catalog/drafts/{id}/publish` | **task-author only**: merge the draft into the catalog's `main`; `409` with the conflicting paths (resolved the same way a workspace merge's conflicts are, see [Fork and merge](#fork-and-merge)) when `main` moved and a resolution is needed |
 
 An answer is written for the task's current version unless `task_version`
 names another one. Markdown answers use `body`, all other types `value`:
@@ -774,9 +811,13 @@ is printed before the log) and 2 for wrong flags.
 make docker
 docker run -d --name custos -p 127.0.0.1:9090:8080 -v custos-data:/data \
     -e CUSTOS_PUBLIC_URL=http://127.0.0.1:9090 custos:dev
-git push http://127.0.0.1:9090/git/catalog.git main
-docker exec custos custos workspace create --author "Jane Doe <jane@example.org>" \
-    5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
+docker exec custos custos token create --data-dir /data --email jane@example.org \
+    --name "Jane Doe" --admin
+# prints a token once — export it for the commands below
+export CUSTOS_TOKEN=<the printed token>
+git push "http://token:$CUSTOS_TOKEN@127.0.0.1:9090/git/catalog.git" main
+docker exec custos custos workspace create --data-dir /data \
+    --author "Jane Doe <jane@example.org>" 5b6c7d8e-9f0a-4b1c-a2d3-e4f5a6b7c8d9
 ```
 
 The image runs as UID 65532, keeps its repositories in the volume `/data`

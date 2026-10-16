@@ -12,7 +12,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | 1 Core | Catalog and workspace formats, validation, Git over HTTP with a validating pre-receive hook, CLI `validate`, `task new-version`, `workspace create`, `serve`, container image | Done, merged to `main` on 2026-10-03 (`d0af8ad`) |
 | 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Done, merged to `main` on 2026-10-04 (`43ad0c9`) |
 | 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Done, not yet merged to `main` |
-| 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Not planned |
+| 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Done, not yet merged to `main` |
 
 ## Phase 1 — Core
 
@@ -100,4 +100,171 @@ Also note: the container image gets no Docker client in phase 3, so processors r
 
 ## Phase 4 — UI and authentication
 
-Not planned yet.
+The plans run in order, and each needs the ones before it.
+
+| Plan | Content | Tasks | Status |
+| --- | --- | --- | --- |
+| [4a](2026-10-09-phase-4a-auth.md) | Authentication, roles, personal access tokens, OIDC login | 9 | Done |
+| [4b](2026-10-09-phase-4b-catalog-editing.md) | Catalog editing API (drafts, publish, conflict resolution) and the book's HTML export | 8 | Done |
+| [4c](2026-10-09-phase-4c-frontend-engineer.md) | Frontend scaffold (`internal/webui`, the Vue app shell) and the Engineer's views | 12 | Done |
+| [4d](2026-10-09-phase-4d-frontend-authors.md) | Task-Author and Processor-Author views | 9 | Done |
+
+How the plans were made: a shared architecture note,
+[2026-10-09-phase-4-architecture.md](2026-10-09-phase-4-architecture.md),
+fixed the packages, exported names and conventions the four plans share,
+then four subagents wrote the plans from it in parallel. A cross-plan
+reviewer applied all four, in order, to a scratch copy of the repository
+before any plan was executed, and found two near-miss bugs: the auth
+middleware's `excludedPrefixes` treated a bare `"/"` as a prefix match
+(every path starts with `/`, and `"/"` itself ends in `/`), which bypassed
+credential resolution for every single request to every path — exactly
+the value `cmd/custos/serve.go` passes in production, so authentication
+would have been a no-op for a real `custos serve`; and the webui package's
+SPA-shell fallback routed a crafted `/index.html` request through
+`http.FileServer`, whose own built-in redirect for any path ending in
+`/index.html` fired on every client-side route, so the embedded
+single-page application would never actually have loaded. Both were fixed
+in the plan text before execution started. The same review added two
+rulings to the architecture note's list (4.17, 4.18): a
+`catalogdraft.Register` `onPublish` callback so a draft publish reconciles
+pinned workspaces immediately instead of waiting for an unrelated future
+catalog push, and `GET /auth/config` as the signal the frontend uses to
+tell token-only mode apart from "sign in please."
+
+Executed with subagent-driven development on branch
+`worktree-worktree-phase-4`: one implementer and one reviewer per task,
+then a whole-plan review on the most capable model after each plan, fix
+waves for its findings and scoped re-reviews of each wave; finished with a
+final whole-branch review and one more fix wave for its findings (this
+one).
+
+**What each plan's own task- and whole-plan reviews found and fixed:**
+
+- **4a (authentication, roles, tokens):** an open redirect in `return_to`
+  validation, reproduced byte-for-byte from the plan's own listing (fixed
+  by rejecting any `return_to` containing a backslash in addition to the
+  existing checks, ruling 4.19); `handlePutRoles` hardcoded 400 for every
+  `UpdateUser` error instead of using `httpStatusForAuthErr` the way
+  `handleCreateToken` correctly does (ruling 4.20). The whole-plan review
+  then found a **Critical** bug that would have stopped `custos serve`
+  from starting at all: `authFlagSet.config()` never set
+  `auth.Config.DataDir`, so `auth.NewManager` always failed "no data
+  directory" on real CLI startup — masked by every existing test
+  hand-building `auth.Config` directly instead of going through the real
+  CLI path. One fix wave, all green.
+- **4b (catalog editing API and book HTML export):** Task 5's review
+  found a **Critical** fast-forward immutability bypass — `allowedPaths`
+  was built from a publish request's raw keys before `Publish` knew
+  whether it was taking the fast-forward or the merge path, and was passed
+  unconditionally into `UpdateCatalog`'s immutability exemption; on the
+  fast-forward path, the validation that a key actually names a real
+  conflict never ran, so a caller could rewrite an already-published task
+  version just by naming its path in the request with any resolution,
+  even though nothing had conflicted. Confirmed exploitable with a
+  throwaway test before the fix (ruling 4.22 records the exemption
+  mechanism that bug lived in). The whole-plan review was otherwise clean,
+  verified end-to-end against a real binary and server (draft lifecycle,
+  two-drafts conflict, auth matrix, book export).
+- **4c (frontend scaffold and Engineer views):** three in-task fixes.
+  Task 2: a direct `GET /index.html` request still routed through
+  `http.FileServer`, which 301-redirects any path ending in
+  `/index.html` — the original fix only covered the SPA-fallback case
+  (synthesizing `index.html` for an unknown route), not a direct hit on
+  the real file. Task 5: `markdown.ts`'s `inline()` ran its
+  backtick/bold/italic/link regexes sequentially over the same string, so
+  a tag inserted by an earlier pass could be swallowed or re-processed by
+  a later one (e.g. a code span containing a link) — a real
+  rendering-correctness bug, confirmed not an XSS escape, fixed by
+  tokenizing instead of chaining global regex replacements. Task 12:
+  `BookView.vue`'s plain `<a href>`/`<iframe :src>` to the book endpoint
+  made passive browser loads that cannot carry the `Authorization:
+  Bearer` header token-only mode needs — it worked under an OIDC
+  session's ambient cookie but 401'd under a pasted token; fixed with the
+  same manual-`fetch`-plus-Blob-URL pattern sibling plan 4d had already
+  applied to `getRunLog`. The whole-plan review was otherwise clean: a
+  full real end-to-end HTTP-level exercise (`make build`, a real binary,
+  roughly 30 curl requests reproducing the exact SPA JS sequence) with
+  plans 4a/4b/4c all wired together, with the explicit, named gap that no
+  browser automation tool was available in that environment, so no actual
+  rendered-DOM/click/OIDC-redirect pass had ever been observed — flagged
+  for a human click-through before shipping (the final whole-branch
+  review's Critical finding below was found exactly that way, with a real
+  headless browser).
+- **4d (Task-Author and Processor-Author views):** all 9 tasks reviewed
+  clean on the first pass, no fix rounds. The whole-plan review was a full
+  real end-to-end exercise (`make build`, a real binary and server,
+  roughly 30 curl requests) covering all 5 Review Focus items, including
+  the merge-conflict round trip, role-boundary enforcement, and the
+  dry-run-forgotten-after-restart case via an actual server restart.
+
+**What the final whole-branch review found, now fixed:**
+
+- **[Critical]** A stored script in an engineer's Markdown answer ran in
+  custos's own origin when an admin opened the workspace's Book view
+  (`BookView.vue`'s `<iframe :srcdoc>` had no `sandbox` attribute) and
+  could read the admin's token-only-mode bearer token out of
+  `sessionStorage` and self-promote to admin via `PUT
+  /api/admin/users/{email}/roles`. Reproduced end to end with a real
+  headless browser: the attack succeeded against the unfixed code (a test
+  account's `admin` flag went from `false` to `true`) and was confirmed
+  blocked after the fix (`sandbox=""` on the iframe, plus
+  `Content-Security-Policy: sandbox` and `X-Content-Type-Options:
+  nosniff` on the HTML response) — ruling 4.23.
+- **[Important]** On a case-insensitive filesystem (macOS/Windows, the
+  dev-server default), `internal/server`'s push-path role gate matched
+  the catalog/workspace path case-sensitively while git http-backend's
+  own repository lookup folds case, so `/git/Catalog.git`/
+  `/git/catalog.GIT` reached the backend with no role check at all.
+  Reproduced live: a read-only token's push to `/git/Catalog.git`
+  succeeded and catalog `main` actually advanced. Fixed by matching a
+  lower-cased copy of the path; regression test added — ruling 4.24.
+- **[Important]** The `Dockerfile` had no Node build stage, so `make
+  docker`/the published image embedded whatever UI happened to already be
+  on disk (the committed placeholder, or stale local build output)
+  instead of a real build. Fixed with a `node:22-slim` build stage that
+  runs the frontend build and copies its output into the Go build stage
+  before compiling; verified by building and running the real image and
+  confirming it serves the real UI, not the placeholder.
+- **[Important]** `make build`'s `web-build` step deleted the tracked
+  `.gitkeep` and overwrote the tracked placeholder `index.html`, then
+  left the new `assets/` directory untracked — a routine `git add -A`
+  after a build would stage large, frequently-changing build artifacts
+  and could permanently lose the "works with zero npm" placeholder
+  invariant (ruling 4.2). Fixed by extending `.gitignore` to keep
+  `.gitkeep` and `index.html` tracked while ignoring everything else
+  `make build` generates under `internal/webui/dist/`.
+- **[Important]** This documentation gap: spec §11.4 was missing despite
+  dozens of citations of "ruling 4.1" through "ruling 4.18" across the
+  codebase, this file still said phase 4 was "Not planned," and the
+  README had seven separate inaccuracies (base64 instead of hex session
+  secrets, unauthenticated push examples that now 401, a missing Node.js
+  prerequisite, a stale "the web UI follows" placeholder sentence, missing
+  endpoint rows, and wrong descriptions of `--admin-emails` and
+  `--oidc-redirect-url`). All fixed in this dispatch.
+
+Rulings: spec §11.4 holds 18 rulings from the architecture note and its
+cross-plan review (4.1–4.18), 4 made while executing the plans
+(4.19–4.22), 2 made by this final whole-branch review (4.23–4.24), and 2
+Minor findings recorded as deliberate non-fixes rather than acted-on
+rulings (4.25–4.26). These change the spec or the way custos is run and
+deserve a look first:
+
+| Ruling | What changes |
+| --- | --- |
+| 2.6 | Replaced: `X-Custos-Author` is gone; every write is authored by the signed-in caller (OIDC session or personal access token). |
+| 2.7 | The shared attachment store now has access control: reading or writing a workspace's attachments needs that workspace's engineer role (or admin). |
+| 2.11 | HTML export now exists: `GET /api/workspaces/{id}/book?format=html`. |
+| 2.12 | The catalog API is no longer read-only: drafts, task/group/processor edits and publish now go through `internal/catalogdraft`. |
+| 4.6 | `--admin-emails` is checked fresh on every request, not cached at start-up — granting admin takes effect on that person's next request, not just at first sign-in. |
+| 4.21 | goldmark's `WithUnsafe()` (raw HTML passthrough in the book) is accepted as a deliberate, reversible, small-org-scale decision — now contained by ruling 4.23's sandboxed iframe and CSP headers. |
+| 4.23 | `BookView`'s HTML preview is sandboxed (`sandbox=""`) and CSP-restricted, closing the privilege-escalation path `WithUnsafe()` otherwise left open. |
+| 4.24 | The catalog/workspace push-path role gate matches case-insensitively, closing a macOS/Windows-only role-gate bypass. |
+
+Also note: the container image now really does embed a built frontend
+(the `Dockerfile` gained a Node build stage in the final review; it
+previously embedded whatever happened to already be on disk at build
+time). `make test` now runs `go test ./... -race -count=1` (previously no
+`-race`).
+
+Phase 4 is complete on branch `worktree-worktree-phase-4` — not yet merged
+to `main` — and ready for the finishing step.
