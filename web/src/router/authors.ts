@@ -53,5 +53,10 @@ export const authorRoutes: RouteRecordRaw[] = [
     name: 'processors',
     component: () => import('../views/processorauthor/RegistryView.vue'),
   },
+  {
+    path: '/processors/:name/runs',
+    name: 'processor-runs',
+    component: () => import('../views/processorauthor/RunsView.vue'),
+  },
   // plan 4d: later tasks insert their routes above this line
 ]
