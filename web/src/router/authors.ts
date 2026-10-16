@@ -28,5 +28,15 @@ export function routeParam(v: string | null | (string | null)[] | undefined): st
 }
 
 export const authorRoutes: RouteRecordRaw[] = [
+  {
+    path: '/catalog/drafts',
+    name: 'catalog-drafts',
+    component: () => import('../views/taskauthor/DraftsView.vue'),
+  },
+  {
+    path: '/catalog/drafts/:draftId',
+    name: 'catalog-draft',
+    component: () => import('../views/taskauthor/DraftsView.vue'),
+  },
   // plan 4d: later tasks insert their routes above this line
 ]
