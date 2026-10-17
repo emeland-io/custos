@@ -217,6 +217,7 @@ custos processor test IMAGE --answer FILE [--previous DIR] [...]
                                                          # run a processor locally, print its proposal
 custos config get server-url [--show-source]             # print the server URL custos would use
 custos config set server-url URL                         # remember it in ~/.config/custos/config.yaml
+custos completion bash|zsh|fish|powershell               # print a shell completion script
 ```
 
 `workspace create` and `serve` need `--data-dir` or `CUSTOS_DATA_DIR`.

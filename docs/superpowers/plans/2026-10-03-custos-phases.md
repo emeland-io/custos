@@ -13,7 +13,7 @@ Status of the custos delivery phases (spec §9) and where their plans and ruling
 | 2 Flows | Catalog updates reaching workspaces, workspace freeze and catalog-update proposals, answering, attachments, REST API, `custos clone`/`push`, workspace fork and merge | Done, merged to `main` on 2026-10-04 (`43ad0c9`) |
 | 3 Processors | Processor registry and runner (containers), matching generated tasks across reruns, proposals for review, cascades and depth limit, signature checks, Go/Python SDKs, `processor test`, dry runs. Replaces ruling 2.10: merge conflicts in generated output get a processor rerun instead of a pick-one-side choice. | Done, not yet merged to `main` |
 | 4 UI and authentication | Web UI for engineers, task authors and processor authors; HTML book; catalog editing through the API; OIDC login, roles and tokens. Replaces the `X-Custos-Author` header (ruling 2.6) and adds access control for the shared attachment store (ruling 2.7). | Done, not yet merged to `main` |
-| 5 cobra/viper command line | Replace the `flag` dispatcher with cobra; flag, environment and personal config file layered with viper; `custos config get\|set` | Done, not yet merged to `main` |
+| 5 cobra/viper command line | Replace the `flag` dispatcher with cobra; flag, environment and personal config file layered with viper; `custos config get\|set` | Done, merged to `main` on 2026-10-17 (`ea0b402`) |
 
 ## Phase 1 — Core
 
@@ -274,7 +274,7 @@ to `main` — and ready for the finishing step.
 
 - Plan: [2026-10-16-cobra-viper-cli.md](2026-10-16-cobra-viper-cli.md), 13 tasks.
 - Executed with subagent-driven development on branch `worktree-phase-5-cobra-viper`: one implementer and one reviewer per task. The final whole-branch review (most capable model, 4436c75..3491f33) found no Critical issues. Three Important and four Minor findings were fixed in one fix wave: the completion command disabled and ruling 5.16 added, the nil-args seam in `runCobra`, the phases-file status, `config get` validating the URL, the `CheckURL` host check, the `push` usage line, and the wording of ruling 5.15. A scoped re-review followed.
-- Status: all 13 tasks implemented. Done, not yet merged to `main`.
+- Status: all 13 tasks implemented. Done, merged to `main` on 2026-10-17 (fast-forward to `ea0b402`). Afterwards the project owner asked for the `completion` command to be enabled again (it had been disabled in the final fix wave); it now is, and misuse of it exits 2 (ruling 5.16).
 - Rulings: spec §11.5 (5.1–5.10 from planning, 5.11–5.16 made while executing).
 
 The tasks:

@@ -62,7 +62,6 @@ func newRootCmd(c *cli) *cobra.Command {
 			return usageError(cmd.UsageString())
 		},
 	}
-	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetIn(c.stdin)
 	root.SetOut(c.stdout)
 	root.SetErr(c.stderr)
@@ -73,6 +72,16 @@ func newRootCmd(c *cli) *cobra.Command {
 	root.PersistentFlags().String("server-url", "", "URL of the custos server, for the commands that talk to one (env CUSTOS_SERVER_URL; today only \"config get\" reads it)")
 	// Commands are added here, one line each, in the task that ports them.
 	root.AddCommand(c.configCmd(), c.validateCmd(), c.taskCmd(), c.workspaceCmd(), c.tokenCmd(), c.cloneCmd(), c.pushCmd(), c.hookCmd(), c.processorCmd(), c.serveCmd())
+	// Shell completion is cobra's own command and stays enabled (ruling 5.16).
+	// Cobra would add it only inside Execute; add it now so that, like task,
+	// token and the other commands that only group subcommands, a bare
+	// `completion` or an unknown shell is a usage error (exit 2), not help
+	// with exit 0.
+	root.InitDefaultCompletionCmd()
+	if comp, _, err := root.Find([]string{"completion"}); err == nil && comp != root {
+		comp.Args = cobra.ArbitraryArgs
+		comp.RunE = func(cmd *cobra.Command, _ []string) error { return usageError(cmd.UsageString()) }
+	}
 	return root
 }
 
