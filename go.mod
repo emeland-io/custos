@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/carabiner-dev/signer v0.6.2
+	github.com/carabiner-dev/signer v0.6.4
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
